@@ -1,9 +1,9 @@
 const axios = require("axios");
 
-const BASE_URL = "https://fapi.binance.com"; // Futures piyasa verisi
+const BASE_URL = "https://api.binance.com";
 
 async function getKlines(symbol = "BTCUSDT", interval = "5m", limit = 100) {
-  const url = `${BASE_URL}/fapi/v1/klines`;
+  const url = `${BASE_URL}/api/v3/klines`;
 
   const res = await axios.get(url, {
     params: { symbol, interval, limit },
@@ -21,7 +21,7 @@ async function getKlines(symbol = "BTCUSDT", interval = "5m", limit = 100) {
 }
 
 async function getPrice(symbol = "BTCUSDT") {
-  const url = `${BASE_URL}/fapi/v1/ticker/price`;
+  const url = `${BASE_URL}/api/v3/ticker/price`;
   const res = await axios.get(url, { params: { symbol } });
 
   return {
