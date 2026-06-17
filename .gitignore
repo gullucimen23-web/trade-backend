@@ -1,3 +1,4 @@
 node_modules/
 .env
-*.json
+firebase-adminsdk*.json
+gelsinparalar*.json
