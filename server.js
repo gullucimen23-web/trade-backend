@@ -10,6 +10,12 @@ const { getSpotAccount } = require("./binancePrivate");
 const { loadOpenTrades, getOpenTrades, getAllTrades } = require("./paperTrade");
 const { getRiskStats } = require("./riskGuard");
 
+const {
+  approveTrade,
+  rejectTrade,
+  getAllApprovals,
+} = require("./approvalStore");
+
 const app = express();
 app.use(express.json());
 
@@ -127,6 +133,54 @@ app.get("/status", (req, res) => {
       totalTrades: allTrades.length,
       trades: openTrades,
     },
+  });
+});
+app.get("/approvals", (req, res) => {
+  res.json({
+    ok: true,
+    approvals: getAllApprovals(),
+  });
+});
+
+app.get("/approve/:symbol", async (req, res) => {
+  const symbol = req.params.symbol.toUpperCase();
+
+  const approval = approveTrade(symbol);
+
+  if (!approval) {
+    return res.status(404).json({
+      ok: false,
+      message: "Bekleyen işlem bulunamadı",
+    });
+  }
+
+  await sendTelegram(
+    `✅ ONAYLANDI\n${symbol}\n${approval.side}\nSkor: ${approval.score}`
+  );
+
+  res.json({
+    ok: true,
+    approval,
+  });
+});
+
+app.get("/reject/:symbol", async (req, res) => {
+  const symbol = req.params.symbol.toUpperCase();
+
+  const approval = rejectTrade(symbol);
+
+  if (!approval) {
+    return res.status(404).json({
+      ok: false,
+      message: "Bekleyen işlem bulunamadı",
+    });
+  }
+
+  await sendTelegram(`❌ REDDEDİLDİ\n${symbol}`);
+
+  res.json({
+    ok: true,
+    approval,
   });
 });
 
