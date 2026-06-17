@@ -12,6 +12,7 @@ const {
   canOpenTrade,
   registerTradeOpen,
 } = require("./riskGuard");
+const { createApproval } = require("./approvalStore");
 
 const SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
 let lastSignals = {};
@@ -38,6 +39,10 @@ PnL: <b>%${closed.pnlPercent}</b>
 
     if (signal.score < 80) return;
 
+    const signalKey = `${symbol}_${signal.action}_${Math.round(signal.lastClose)}`;
+    if (lastSignals[symbol] === signalKey) return;
+    lastSignals[symbol] = signalKey;
+
     const riskCheck = canOpenTrade();
 
     if (!riskCheck.allowed) {
@@ -46,21 +51,13 @@ PnL: <b>%${closed.pnlPercent}</b>
     }
 
     const tradePlan = buildTradePlan(symbol, signal);
-    const paperTrade = await createPaperTrade(symbol, signal, tradePlan);
-
-    if (paperTrade) {
-      registerTradeOpen();
-    }
-
-    const signalKey = `${symbol}_${signal.action}_${Math.round(signal.lastClose)}`;
-
-    if (lastSignals[symbol] === signalKey) return;
-    lastSignals[symbol] = signalKey;
+    const approval = createApproval(symbol, signal, tradePlan);
 
     const ai = await askOpenAIWithGuard({
       symbol,
       signalScore: signal.score,
       action: signal.action,
+      side: signal.side,
       price: signal.lastClose,
       rsi: signal.rsi,
       ema9: signal.ema9,
@@ -74,10 +71,17 @@ PnL: <b>%${closed.pnlPercent}</b>
 
     const openAiText = ai.raw || ai.reason || "OpenAI cevap vermedi.";
 
+    const paperTrade = await createPaperTrade(symbol, signal, tradePlan);
+
+    if (paperTrade) {
+      registerTradeOpen();
+    }
+
     const message = `
-🚀 <b>Güçlü Sinyal Yakalandı</b>
+🚀 <b>Profesyonel Trade Fırsatı</b>
 
 Parite: <b>${symbol}</b>
+Yön: <b>${signal.side}</b>
 Aksiyon: <b>${signal.action}</b>
 Skor: <b>${signal.score}/100</b>
 
@@ -86,7 +90,14 @@ TP: <b>${tradePlan.takeProfitPrice}</b> (%${tradePlan.takeProfitPercent})
 SL: <b>${tradePlan.stopLossPrice}</b> (%${tradePlan.stopLossPercent})
 Pozisyon: <b>%${tradePlan.positionSizePercent}</b>
 Kaldıraç: <b>${tradePlan.leverage}x</b>
-Trailing Stop: <b>${tradePlan.trailingStop ? "Açık" : "Kapalı"}</b>
+
+Onay Komutu:
+<b>ONAYLA ${symbol}</b>
+
+Red Komutu:
+<b>RED ${symbol}</b>
+
+Onay ID: <b>${approval.id}</b>
 
 Paper Trade: <b>${paperTrade ? "AÇILDI" : "Açık işlem zaten var"}</b>
 
@@ -94,6 +105,7 @@ RSI: ${signal.rsi}
 EMA9: ${signal.ema9}
 EMA21: ${signal.ema21}
 Trend EMA: ${signal.trendEma}
+ADX: ${signal.adx}
 Hacim: ${signal.volume}
 Ortalama Hacim: ${signal.avgVolume}
 
@@ -107,7 +119,7 @@ ${openAiText}
 `;
 
     await sendTelegram(message);
-    console.log("✅ Sinyal gönderildi:", symbol, signal.action, signal.score);
+    console.log("✅ Onaylı trade kartı gönderildi:", symbol, signal.action, signal.score);
   } catch (err) {
     console.error(`${symbol} tarama hatası:`, err.message);
   }

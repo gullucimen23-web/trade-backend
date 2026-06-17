@@ -6,6 +6,7 @@ const { askOpenAIWithGuard, getOpenAIStats } = require("./openaiGuard");
 const { getKlines, getPrice } = require("./binance");
 const { analyzeMarket } = require("./strategy");
 const { startScanner } = require("./scanner");
+const { startTelegramCommands } = require("./telegramCommands");
 const { getSpotAccount } = require("./binancePrivate");
 const { loadOpenTrades, getOpenTrades, getAllTrades } = require("./paperTrade");
 const { getRiskStats } = require("./riskGuard");
@@ -130,13 +131,12 @@ app.get("/status", (req, res) => {
   });
 });
 
-startScanner();
-
 const PORT = process.env.PORT || 3000;
 
 async function startApp() {
   await loadOpenTrades();
   startScanner();
+  startTelegramCommands();
 
   app.listen(PORT, () => {
     console.log(`✅ Bot backend çalışıyor: http://localhost:${PORT}`);
