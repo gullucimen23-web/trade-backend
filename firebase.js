@@ -1,14 +1,18 @@
-const { initializeApp, cert, getApps } = require("firebase-admin/app");
-const { getFirestore } = require("firebase-admin/firestore");
+const admin = require("firebase-admin");
 
-const serviceAccount = require("./gelsinparalar-14967-firebase-adminsdk-fbsvc-82bf3f3220.json");
+if (!admin.apps.length) {
+  const serviceAccount = JSON.parse(
+    process.env.FIREBASE_SERVICE_ACCOUNT
+  );
 
-if (getApps().length === 0) {
-  initializeApp({
-    credential: cert(serviceAccount),
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
   });
 }
 
-const db = getFirestore();
+const db = admin.firestore();
 
-module.exports = { db };
+module.exports = {
+  admin,
+  db,
+};
