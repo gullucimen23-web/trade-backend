@@ -9,11 +9,8 @@ let trades = [];
 
 async function loadOpenTrades() {
   const openTrades = await getOpenTradesFromFirestore();
-
   trades = openTrades;
-
   console.log(`♻️ Firestore'dan ${trades.length} açık işlem yüklendi.`);
-
   return trades;
 }
 
@@ -63,26 +60,25 @@ async function updatePaperTrades(symbol, currentPrice) {
   for (const trade of trades) {
     if (trade.symbol !== symbol || trade.status !== "OPEN") continue;
 
-    if (currentPrice >= trade.takeProfitPrice) {
-      trade.status = "CLOSED_TP";
-      trade.exit = currentPrice;
-      trade.pnlPercent = Number(
-        (((currentPrice - trade.entry) / trade.entry) * 100 * trade.leverage).toFixed(2)
-      );
-      trade.closedAt = new Date().toISOString();
+    const isLong = trade.side === "LONG";
 
-      await updateTrade(trade);
-      await updateDailyStats(trade);
-      closed.push(trade);
-      continue;
-    }
+    const hitTp = isLong
+      ? currentPrice >= trade.takeProfitPrice
+      : currentPrice <= trade.takeProfitPrice;
 
-    if (currentPrice <= trade.stopLossPrice) {
-      trade.status = "CLOSED_SL";
+    const hitSl = isLong
+      ? currentPrice <= trade.stopLossPrice
+      : currentPrice >= trade.stopLossPrice;
+
+    if (hitTp || hitSl) {
+      trade.status = hitTp ? "CLOSED_TP" : "CLOSED_SL";
       trade.exit = currentPrice;
-      trade.pnlPercent = Number(
-        (((currentPrice - trade.entry) / trade.entry) * 100 * trade.leverage).toFixed(2)
-      );
+
+      const rawPnl = isLong
+        ? ((currentPrice - trade.entry) / trade.entry) * 100
+        : ((trade.entry - currentPrice) / trade.entry) * 100;
+
+      trade.pnlPercent = Number((rawPnl * trade.leverage).toFixed(2));
       trade.closedAt = new Date().toISOString();
 
       await updateTrade(trade);

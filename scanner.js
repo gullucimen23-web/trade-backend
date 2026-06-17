@@ -30,6 +30,7 @@ async function scanSymbol(symbol) {
 ✅ <b>Paper Trade Kapandı</b>
 
 Parite: <b>${closed.symbol}</b>
+Yön: <b>${closed.side}</b>
 Durum: <b>${closed.status}</b>
 Giriş: <b>${closed.entry}</b>
 Çıkış: <b>${closed.exit}</b>
@@ -44,7 +45,6 @@ PnL: <b>%${closed.pnlPercent}</b>
     lastSignals[symbol] = signalKey;
 
     const riskCheck = canOpenTrade();
-
     if (!riskCheck.allowed) {
       console.log(`⛔ İşlem açılmadı: ${riskCheck.reason}`);
       return;
@@ -71,11 +71,23 @@ PnL: <b>%${closed.pnlPercent}</b>
 
     const openAiText = ai.raw || ai.reason || "OpenAI cevap vermedi.";
 
-    const paperTrade = await createPaperTrade(symbol, signal, tradePlan);
+    const autoMode = process.env.AUTO_MODE === "true";
+    const autoMinScore = Number(process.env.AUTO_MIN_SCORE || 95);
+    let paperTrade = null;
+    let autoText = "Manuel onay bekliyor.";
 
-    if (paperTrade) {
-      registerTradeOpen();
+    if (autoMode && signal.score >= autoMinScore) {
+      paperTrade = await createPaperTrade(symbol, signal, tradePlan);
+
+      if (paperTrade) {
+        registerTradeOpen();
+        autoText = "AUTO_MODE ile otomatik paper trade açıldı.";
+      } else {
+        autoText = "AUTO_MODE aktif ama açık işlem zaten var.";
+      }
     }
+
+    const baseUrl = process.env.PUBLIC_URL || "https://trade-backend-0fz1.onrender.com";
 
     const message = `
 🚀 <b>Profesyonel Trade Fırsatı</b>
@@ -91,15 +103,17 @@ SL: <b>${tradePlan.stopLossPrice}</b> (%${tradePlan.stopLossPercent})
 Pozisyon: <b>%${tradePlan.positionSizePercent}</b>
 Kaldıraç: <b>${tradePlan.leverage}x</b>
 
-Onay Komutu:
-<b>ONAYLA ${symbol}</b>
+✅ Onay Linki:
+${baseUrl}/approve/${symbol}
 
-Red Komutu:
-<b>RED ${symbol}</b>
+❌ Red Linki:
+${baseUrl}/reject/${symbol}
 
 Onay ID: <b>${approval.id}</b>
+Geçerlilik: <b>3 dakika</b>
 
-Paper Trade: <b>${paperTrade ? "AÇILDI" : "Açık işlem zaten var"}</b>
+Auto Mode:
+<b>${autoText}</b>
 
 RSI: ${signal.rsi}
 EMA9: ${signal.ema9}
@@ -119,7 +133,7 @@ ${openAiText}
 `;
 
     await sendTelegram(message);
-    console.log("✅ Onaylı trade kartı gönderildi:", symbol, signal.action, signal.score);
+    console.log("✅ Trade kartı gönderildi:", symbol, signal.action, signal.score);
   } catch (err) {
     console.error(`${symbol} tarama hatası:`, err.message);
   }

@@ -7,10 +7,10 @@ const { getKlines, getPrice } = require("./binance");
 const { analyzeMarket } = require("./strategy");
 const { startScanner } = require("./scanner");
 const { getSpotAccount } = require("./binancePrivate");
-const { loadOpenTrades, getOpenTrades, getAllTrades } = require("./paperTrade");
-const { getRiskStats } = require("./riskGuard");
-
+const { loadOpenTrades, getOpenTrades, getAllTrades, createPaperTrade } = require("./paperTrade");
+const { getRiskStats, registerTradeOpen } = require("./riskGuard");
 const {
+  getApproval,
   approveTrade,
   rejectTrade,
   getAllApprovals,
@@ -126,8 +126,11 @@ app.get("/status", (req, res) => {
     bot: "RUNNING",
     tradingEnabled: process.env.TRADING_ENABLED === "true",
     tradeMode: process.env.TRADE_MODE || "SPOT",
+    autoMode: process.env.AUTO_MODE === "true",
+    autoMinScore: Number(process.env.AUTO_MIN_SCORE || 95),
     openai: getOpenAIStats(),
     risk: getRiskStats(),
+    approvals: getAllApprovals(),
     paper: {
       openTrades: openTrades.length,
       totalTrades: allTrades.length,
@@ -135,6 +138,7 @@ app.get("/status", (req, res) => {
     },
   });
 });
+
 app.get("/approvals", (req, res) => {
   res.json({
     ok: true,
@@ -143,30 +147,95 @@ app.get("/approvals", (req, res) => {
 });
 
 app.get("/approve/:symbol", async (req, res) => {
-  const symbol = req.params.symbol.toUpperCase();
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const approval = getApproval(symbol);
 
-  const approval = approveTrade(symbol);
+    if (!approval) {
+      return res.status(404).json({
+        ok: false,
+        message: "Bekleyen işlem bulunamadı",
+      });
+    }
 
-  if (!approval) {
-    return res.status(404).json({
+    if (approval.status !== "PENDING") {
+      return res.status(400).json({
+        ok: false,
+        message: `İşlem zaten ${approval.status}`,
+        approval,
+      });
+    }
+
+    const ageMs = Date.now() - new Date(approval.createdAt).getTime();
+    if (ageMs > 3 * 60 * 1000) {
+      approval.status = "EXPIRED";
+
+      await sendTelegram(`⏰ Onay süresi geçti: ${symbol}`);
+
+      return res.status(400).json({
+        ok: false,
+        message: "Onay süresi geçti",
+        approval,
+      });
+    }
+
+    const priceData = await getPrice(symbol);
+    const currentPrice = Number(priceData.price);
+    const entry = Number(approval.entry);
+    const maxSlipPercent = Number(process.env.MAX_APPROVAL_SLIPPAGE_PERCENT || 0.25);
+
+    const diffPercent =
+      approval.side === "LONG"
+        ? ((currentPrice - entry) / entry) * 100
+        : ((entry - currentPrice) / entry) * 100;
+
+    if (diffPercent > maxSlipPercent) {
+      approval.status = "PRICE_MOVED";
+
+      await sendTelegram(
+        `⚠️ Fiyat kaçtı, işlem açılmadı.\n${symbol}\nEntry: ${entry}\nŞu an: ${currentPrice}`
+      );
+
+      return res.status(400).json({
+        ok: false,
+        message: "Fiyat kaçtı, işlem açılmadı",
+        currentPrice,
+        approval,
+      });
+    }
+
+    approveTrade(symbol);
+
+    const paperTrade = await createPaperTrade(
+      symbol,
+      approval.signal,
+      approval.tradePlan
+    );
+
+    if (paperTrade) {
+      registerTradeOpen();
+    }
+
+    await sendTelegram(
+      `✅ ONAYLANDI VE PAPER TRADE AÇILDI\n${symbol}\n${approval.side}\nSkor: ${approval.score}`
+    );
+
+    res.json({
+      ok: true,
+      message: "Onaylandı ve paper trade açıldı",
+      paperTrade,
+      approval,
+    });
+  } catch (err) {
+    res.status(500).json({
       ok: false,
-      message: "Bekleyen işlem bulunamadı",
+      error: err.message,
     });
   }
-
-  await sendTelegram(
-    `✅ ONAYLANDI\n${symbol}\n${approval.side}\nSkor: ${approval.score}`
-  );
-
-  res.json({
-    ok: true,
-    approval,
-  });
 });
 
 app.get("/reject/:symbol", async (req, res) => {
   const symbol = req.params.symbol.toUpperCase();
-
   const approval = rejectTrade(symbol);
 
   if (!approval) {
@@ -189,7 +258,6 @@ const PORT = process.env.PORT || 3000;
 async function startApp() {
   await loadOpenTrades();
   startScanner();
-  
 
   app.listen(PORT, () => {
     console.log(`✅ Bot backend çalışıyor: http://localhost:${PORT}`);
