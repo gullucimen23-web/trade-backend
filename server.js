@@ -1,7 +1,7 @@
 require("dotenv").config();
 
 const express = require("express");
-const { sendTelegram } = require("./telegram");
+const { sendTelegram, answerCallbackQuery, setTelegramWebhook } = require("./telegram");
 const { askOpenAIWithGuard, getOpenAIStats } = require("./openaiGuard");
 const { getKlines, getPrice } = require("./binance");
 const { analyzeMarket } = require("./strategy");
@@ -11,12 +11,99 @@ const { loadOpenTrades, getOpenTrades, getAllTrades, createPaperTrade } = requir
 const { getRiskStats, registerTradeOpen } = require("./riskGuard");
 const { isBotActive, startBot, stopBot } = require("./botState");
 const { getApproval, approveTrade, rejectTrade, getAllApprovals } = require("./approvalStore");
+const {
+  createTrackedTradeFromApproval,
+  stopTrackedTrade,
+  getTrackedTrades,
+  getActiveTrackedTrades,
+} = require("./trackStore");
 
 const app = express();
 app.use(express.json());
 
 app.get("/", (req, res) => {
-  res.json({ ok: true, name: "Falix Trade Bot Backend", tradingEnabled: process.env.TRADING_ENABLED === "true", openai: getOpenAIStats() });
+  res.json({
+    ok: true,
+    name: "Falix Trade Bot Backend",
+    tradingEnabled: process.env.TRADING_ENABLED === "true",
+    openai: getOpenAIStats(),
+  });
+});
+
+app.get("/set-telegram-webhook", async (req, res) => {
+  try {
+    const result = await setTelegramWebhook();
+    res.json({ ok: true, result });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/telegram-webhook", async (req, res) => {
+  try {
+    const update = req.body;
+
+    if (update.callback_query) {
+      const callback = update.callback_query;
+      const data = callback.data || "";
+      const user = callback.from || {};
+      const parts = data.split(":");
+      const command = parts[0];
+      const symbol = parts[1];
+      const approvalId = parts[2];
+
+      if (command === "TRACK") {
+        const approval = getApproval(symbol);
+
+        if (!approval || approval.id !== approvalId) {
+          await answerCallbackQuery(callback.id, "Bu sinyal artık bulunamadı.");
+          return res.json({ ok: true });
+        }
+
+        const tracked = createTrackedTradeFromApproval(approval, user);
+
+        await answerCallbackQuery(callback.id, "Takibe alındı. Raporlar özelden gelecek.");
+
+        await sendTelegram(
+          `
+✅ <b>İşlem Takibe Alındı</b>
+
+Parite: <b>${tracked.symbol}</b>
+Yön: <b>${tracked.side}</b>
+Giriş: <b>${tracked.entry}</b>
+TP: <b>${tracked.takeProfitPrice}</b>
+SL: <b>${tracked.stopLossPrice}</b>
+
+Not: Özel mesajların gelmesi için botu özelden /start yapmış olman gerekebilir.
+`,
+          tracked.userId
+        );
+
+        return res.json({ ok: true });
+      }
+
+      if (command === "IGNORE") {
+        await answerCallbackQuery(callback.id, "Tamam, takip edilmeyecek.");
+        return res.json({ ok: true });
+      }
+
+      if (command === "STOPTRACK") {
+        const stopped = stopTrackedTrade(symbol, user.id);
+
+        await answerCallbackQuery(
+          callback.id,
+          stopped ? "Takip durduruldu." : "Takip bulunamadı."
+        );
+
+        return res.json({ ok: true });
+      }
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Telegram webhook hata:", err.message);
+    res.json({ ok: false, error: err.message });
+  }
 });
 
 app.get("/start-bot", async (req, res) => {
@@ -37,7 +124,15 @@ app.get("/test-telegram", async (req, res) => {
 });
 
 app.get("/test-openai", async (req, res) => {
-  const result = await askOpenAIWithGuard({ symbol: "BTCUSDT", signalScore: 88, trend: "Yukarı trend", rsi: 42, ema: "EMA9 > EMA21", volume: "Hacim ortalamanın üstünde" });
+  const result = await askOpenAIWithGuard({
+    symbol: "BTCUSDT",
+    signalScore: 88,
+    trend: "Yukarı trend",
+    rsi: 42,
+    ema: "EMA9 > EMA21",
+    volume: "Hacim ortalamanın üstünde",
+  });
+
   res.json(result);
 });
 
@@ -65,7 +160,18 @@ app.get("/signal/:symbol", async (req, res) => {
 app.get("/test-binance", async (req, res) => {
   try {
     const account = await getSpotAccount();
-    res.json({ ok: true, canReadAccount: true, accountType: "SPOT", balances: account.balances?.filter((a) => Number(a.free) > 0 || Number(a.locked) > 0)?.map((a) => ({ asset: a.asset, free: a.free, locked: a.locked })) });
+    res.json({
+      ok: true,
+      canReadAccount: true,
+      accountType: "SPOT",
+      balances: account.balances
+        ?.filter((a) => Number(a.free) > 0 || Number(a.locked) > 0)
+        ?.map((a) => ({
+          asset: a.asset,
+          free: a.free,
+          locked: a.locked,
+        })),
+    });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.response?.data || err.message });
   }
@@ -75,9 +181,18 @@ app.get("/paper/open", (req, res) => res.json({ ok: true, trades: getOpenTrades(
 app.get("/paper/all", (req, res) => res.json({ ok: true, trades: getAllTrades() }));
 app.get("/risk", (req, res) => res.json({ ok: true, stats: getRiskStats() }));
 
+app.get("/tracked", (req, res) => {
+  res.json({
+    ok: true,
+    active: getActiveTrackedTrades(),
+    all: getTrackedTrades(),
+  });
+});
+
 app.get("/status", (req, res) => {
   const openTrades = getOpenTrades();
   const allTrades = getAllTrades();
+
   res.json({
     ok: true,
     bot: "RUNNING",
@@ -90,7 +205,15 @@ app.get("/status", (req, res) => {
     openai: getOpenAIStats(),
     risk: getRiskStats(),
     approvals: getAllApprovals(),
-    paper: { openTrades: openTrades.length, totalTrades: allTrades.length, trades: openTrades },
+    tracked: {
+      active: getActiveTrackedTrades().length,
+      total: getTrackedTrades().length,
+    },
+    paper: {
+      openTrades: openTrades.length,
+      totalTrades: allTrades.length,
+      trades: openTrades,
+    },
   });
 });
 
@@ -100,6 +223,7 @@ app.get("/approve/:symbol", async (req, res) => {
   try {
     const symbol = req.params.symbol.toUpperCase();
     const approval = getApproval(symbol);
+
     if (!approval) return res.status(404).json({ ok: false, message: "Bekleyen işlem bulunamadı" });
     if (approval.status !== "PENDING") return res.status(400).json({ ok: false, message: `İşlem zaten ${approval.status}`, approval });
 
@@ -114,7 +238,11 @@ app.get("/approve/:symbol", async (req, res) => {
     const currentPrice = Number(priceData.price);
     const entry = Number(approval.entry);
     const maxSlipPercent = Number(process.env.MAX_APPROVAL_SLIPPAGE_PERCENT || 0.25);
-    const diffPercent = approval.side === "LONG" ? ((currentPrice - entry) / entry) * 100 : ((entry - currentPrice) / entry) * 100;
+
+    const diffPercent =
+      approval.side === "LONG"
+        ? ((currentPrice - entry) / entry) * 100
+        : ((entry - currentPrice) / entry) * 100;
 
     if (diffPercent > maxSlipPercent) {
       approval.status = "PRICE_MOVED";
@@ -125,6 +253,7 @@ app.get("/approve/:symbol", async (req, res) => {
     approveTrade(symbol);
     const paperTrade = await createPaperTrade(symbol, approval.signal, approval.tradePlan);
     if (paperTrade) registerTradeOpen();
+
     await sendTelegram(`✅ ONAYLANDI VE PAPER TRADE AÇILDI\n${symbol}\n${approval.side}\nSkor: ${approval.score}`);
     res.json({ ok: true, message: "Onaylandı ve paper trade açıldı", paperTrade, approval });
   } catch (err) {
@@ -141,9 +270,14 @@ app.get("/reject/:symbol", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
+
 async function startApp() {
   await loadOpenTrades();
   startScanner();
-  app.listen(PORT, () => console.log(`✅ Bot backend çalışıyor: http://localhost:${PORT}`));
+
+  app.listen(PORT, () => {
+    console.log(`✅ Bot backend çalışıyor: http://localhost:${PORT}`);
+  });
 }
+
 startApp();
