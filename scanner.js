@@ -16,6 +16,15 @@ const { createApproval } = require("./approvalStore");
 
 const SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
 let lastSignals = {};
+let BOT_ACTIVE = true;
+
+function setBotActive(active) {
+  BOT_ACTIVE = active;
+}
+
+function isBotActive() {
+  return BOT_ACTIVE;
+}
 
 async function scanSymbol(symbol) {
   try {
@@ -143,6 +152,11 @@ function startScanner() {
   console.log("📡 Scanner başlatıldı.");
 
   cron.schedule("*/1 * * * *", async () => {
+    if (!BOT_ACTIVE) {
+      console.log("⏸️ Bot STOP modunda. Piyasa taraması durdu.");
+      return;
+    }
+
     console.log("Piyasa taranıyor...");
 
     for (const symbol of SYMBOLS) {
@@ -151,4 +165,4 @@ function startScanner() {
   });
 }
 
-module.exports = { startScanner };
+module.exports = { startScanner, setBotActive, isBotActive };

@@ -5,7 +5,7 @@ const { sendTelegram } = require("./telegram");
 const { askOpenAIWithGuard, getOpenAIStats } = require("./openaiGuard");
 const { getKlines, getPrice } = require("./binance");
 const { analyzeMarket } = require("./strategy");
-const { startScanner } = require("./scanner");
+const { startScanner, setBotActive, isBotActive } = require("./scanner");
 const { getSpotAccount } = require("./binancePrivate");
 const { loadOpenTrades, getOpenTrades, getAllTrades, createPaperTrade } = require("./paperTrade");
 const { getRiskStats, registerTradeOpen } = require("./riskGuard");
@@ -123,7 +123,8 @@ app.get("/status", (req, res) => {
 
   res.json({
     ok: true,
-    bot: "RUNNING",
+    bot: isBotActive() ? "RUNNING" : "STOPPED",
+    botActive: isBotActive(),
     tradingEnabled: process.env.TRADING_ENABLED === "true",
     tradeMode: process.env.TRADE_MODE || "SPOT",
     autoMode: process.env.AUTO_MODE === "true",
@@ -136,6 +137,29 @@ app.get("/status", (req, res) => {
       totalTrades: allTrades.length,
       trades: openTrades,
     },
+  });
+});
+
+
+app.get("/start-bot", async (req, res) => {
+  setBotActive(true);
+  await sendTelegram("▶️ Bot START edildi. Piyasa taraması aktif.");
+
+  res.json({
+    ok: true,
+    bot: "STARTED",
+    botActive: true,
+  });
+});
+
+app.get("/stop-bot", async (req, res) => {
+  setBotActive(false);
+  await sendTelegram("⏸️ Bot STOP edildi. Piyasa taraması durduruldu.");
+
+  res.json({
+    ok: true,
+    bot: "STOPPED",
+    botActive: false,
   });
 });
 

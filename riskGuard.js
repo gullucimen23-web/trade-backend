@@ -19,15 +19,7 @@ function resetIfNewDay() {
 function canOpenTrade() {
   resetIfNewDay();
 
-  const maxTrades = Number(process.env.MAX_DAILY_TRADES || 3);
   const maxLoss = Number(process.env.MAX_DAILY_LOSS_PERCENT || 3);
-
-  if (dailyStats.tradesToday >= maxTrades) {
-    return {
-      allowed: false,
-      reason: "Günlük işlem limiti doldu",
-    };
-  }
 
   if (dailyStats.lossPercentToday >= maxLoss) {
     return {
