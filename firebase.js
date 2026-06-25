@@ -2,10 +2,9 @@ const { getFirestore } = require("firebase-admin/firestore");
 
 (async () => {
   try {
-    await getFirestore().listCollections();
-    console.log("FIRESTORE OK");
+    const cols = await getFirestore().listCollections();
+    console.log("Collections:", cols.map(c => c.id));
   } catch (e) {
-    console.error("FIRESTORE ERROR");
-    console.error(e);
+    console.error("LIST ERROR:", e);
   }
 })();
