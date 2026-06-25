@@ -1,5 +1,5 @@
 const { getKlines } = require("./binance");
-const { analyzeMarket } = require("./strategy");
+const { analyzeMarket, analyzeMultiTimeframe } = require("./strategy");
 const { askOpenAIWithGuard } = require("./openaiGuard");
 const { sendTelegram, sendTelegramWithButtons } = require("./telegram");
 const { buildTradePlan } = require("./risk");
@@ -84,6 +84,10 @@ EMA9/21: ${signal.ema9} / ${signal.ema21}
 MACD: ${signal.macdSide}
 ADX: ${signal.adx}
 Hacim: x${signal.volumeRatio}
+Giriş Onayı: <b>${signal.entryApproved ? "VAR" : "YOK / BEKLE"}</b>
+${signal.filters?.length ? `
+Filtre:
+${signal.filters.slice(0, 4).map((r) => `⛔ ${r}`).join("\n")}` : ""}
 
 Sebep:
 ${signal.reasons.slice(0, 6).map((r) => `✅ ${r}`).join("\n")}
@@ -115,8 +119,13 @@ Açık pozisyon varsa bot her ${process.env.FOLLOW_REPORT_SECONDS || 60} saniyed
 }
 
 async function scanSymbol(symbol) {
-  const candles = await getKlines(symbol, process.env.SCAN_INTERVAL || "5m", 220);
-  const signal = analyzeMarket(candles);
+  const [candles5m, candles15m, candles1h] = await Promise.all([
+    getKlines(symbol, process.env.SCAN_INTERVAL || "5m", 220),
+    getKlines(symbol, "15m", 220),
+    getKlines(symbol, "1h", 220),
+  ]);
+
+  const signal = analyzeMultiTimeframe({ candles5m, candles15m, candles1h });
   const currentPrice = signal.lastClose;
   latestSignals[symbol] = signal;
 
@@ -128,7 +137,17 @@ async function scanSymbol(symbol) {
   await sendUserTrackedReports(symbol, signal, currentPrice);
 
   const signalThreshold = Number(process.env.SIGNAL_THRESHOLD || 85);
-  if (signal.score < signalThreshold || !signal.side || signal.side === "NONE") return;
+  if (
+    signal.score < signalThreshold ||
+    !signal.side ||
+    signal.side === "NONE" ||
+    signal.entryApproved === false
+  ) {
+    if (signal.entryBlocked) {
+      console.log(`⏳ ${symbol} izleniyor ama giriş yok: ${signal.filters?.join(" | ")}`);
+    }
+    return;
+  }
 
   const signalKey = `${symbol}_${signal.side}_${Math.round(signal.lastClose)}_${Math.floor(signal.score / 5)}`;
   if (lastSignals[symbol] === signalKey) return;

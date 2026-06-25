@@ -1,27 +1,26 @@
-FALIX TRADE V2 - CANLI POZISYON YONETICI
+FALIX TRADE V3 - SMART PROFIT SUPERVISOR
 
-Bu surumun mantigi:
-- Firestore yok.
-- JSON kayit var: data/*.json
-- Bot 30 saniyede bir piyasayi tarar.
-- Acik pozisyonu 60 saniyede bir takip eder.
-- Risk gorurse normal sureyi beklemeden Telegram'a uyarir.
-- SL/TP dayatmaz; acik pozisyonu gidebildigi yere kadar tasimaya calisir.
-- Kar erimeye baslarsa: KARI KORU / CIKISA HAZIRLAN / SIMDI CIK der.
-- Ters yon guclenirse: SIMDI CIK / TERS YONE HAZIRLAN der.
+Bu sürümün ana amacı: çok sinyal atmak değil, kötü işlemleri elemek ve açık pozisyonu canlı yönetmek.
 
-Manuel pozisyon takip ornegi:
-https://SENIN-RENDER.onrender.com/track-now/BTCUSDT/SHORT?entry=59300&leverage=15&amount=100
+Eklenen ana mantık:
+- 5m + 15m + 1h çoklu zaman dilimi teyidi.
+- Hacim zayıfsa aktif giriş sinyali göndermez.
+- Direnç kırılmadan PRO_LONG vermez.
+- Destek kırılmadan PRO_SHORT vermez.
+- /signal endpoint artık 5m+15m+1h filtresiyle gerçek bot kararını gösterir.
+- Açık pozisyon takip eder: DEVAM / DİKKAT / KÂRI KORU / ÇIKIŞA HAZIRLAN / ŞİMDİ ÇIK.
+- SL/TP dayatmaz; yön bozulunca uyarı verir.
+- OpenAI opsiyoneldir, botu durdurmaz.
+- Firestore yok, JSON kayıt var: data/*.json
 
-Amount zorunlu degil. Yazarsan tahmini USDT kar/zarar hesaplar.
+Manuel pozisyon takip örneği:
+https://SENIN-RENDER.onrender.com/track-now/BTCUSDT/LONG?entry=60000&leverage=15&amount=100
 
-Deploy:
-git add .
-git commit -m "Falix Trade v2 profit supervisor"
-git push origin main
+Kontrol linkleri:
+/status
+/signal/BTCUSDT
+/tracked
+/test-telegram
 
-Render:
-Manual Deploy -> Clear build cache & deploy
-
-Onemli:
-Garanti kar yok. Bu sistem riski erken yakalamak ve kari korumak icin tasarlandi.
+Önemli:
+Garanti kâr yok. Bu sistem riskli/erken sinyalleri azaltmak, kâr erimesini takip etmek ve ters dönüşte hızlı uyarmak için tasarlandı.

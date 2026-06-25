@@ -4,7 +4,7 @@ const express = require("express");
 const { sendTelegram, answerCallbackQuery, setTelegramWebhook } = require("./telegram");
 const { askOpenAIWithGuard, getOpenAIStats } = require("./openaiGuard");
 const { getKlines, getPrice } = require("./binance");
-const { analyzeMarket } = require("./strategy");
+const { analyzeMarket, analyzeMultiTimeframe } = require("./strategy");
 const { startScanner } = require("./scanner");
 const { getSpotAccount } = require("./binancePrivate");
 const { loadOpenTrades, getOpenTrades, getAllTrades, createPaperTrade } = require("./paperTrade");
@@ -152,9 +152,13 @@ app.get("/price/:symbol", async (req, res) => {
 app.get("/signal/:symbol", async (req, res) => {
   try {
     const symbol = req.params.symbol.toUpperCase();
-    const candles = await getKlines(symbol, "5m", 100);
-    const signal = analyzeMarket(candles);
-    res.json({ symbol, interval: "5m", signal });
+    const [candles5m, candles15m, candles1h] = await Promise.all([
+      getKlines(symbol, "5m", 220),
+      getKlines(symbol, "15m", 220),
+      getKlines(symbol, "1h", 220),
+    ]);
+    const signal = analyzeMultiTimeframe({ candles5m, candles15m, candles1h });
+    res.json({ symbol, interval: "5m+15m+1h", signal });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
