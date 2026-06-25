@@ -1,23 +1,14 @@
-const { db } = require("./firebase");
-
-async function saveTrade(trade) {
-  await db.collection("trade_logs").doc(trade.id).set(trade, { merge: true });
+// Firestore kaldırıldı. Bu dosya eski importlar hata vermesin diye RAM uyumlu stub olarak bırakıldı.
+async function saveTrade() {
+  return true;
 }
 
-async function updateTrade(trade) {
-  await db.collection("trade_logs").doc(trade.id).set(trade, { merge: true });
+async function updateTrade() {
+  return true;
 }
 
 async function getOpenTradesFromFirestore() {
-  const snap = await db
-    .collection("trade_logs")
-    .where("status", "==", "OPEN")
-    .get();
-
-  return snap.docs.map((doc) => ({
-    id: doc.id,
-    ...doc.data(),
-  }));
+  return [];
 }
 
 module.exports = {

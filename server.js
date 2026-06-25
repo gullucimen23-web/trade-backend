@@ -272,12 +272,18 @@ app.get("/reject/:symbol", async (req, res) => {
 const PORT = process.env.PORT || 3000;
 
 async function startApp() {
-  await loadOpenTrades();
-  startScanner();
-
   app.listen(PORT, () => {
     console.log(`✅ Bot backend çalışıyor: http://localhost:${PORT}`);
+    console.log(`🟢 Bot durumu: ${isBotActive() ? "AKTİF" : "DURDURULDU"}`);
   });
+
+  try {
+    await loadOpenTrades();
+  } catch (err) {
+    console.error("Açık işlem yükleme hatası, RAM ile devam:", err.message);
+  }
+
+  startScanner();
 }
 
 startApp();

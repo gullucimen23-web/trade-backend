@@ -1,16 +1,7 @@
-const {
-  saveTrade,
-  updateTrade,
-  getOpenTradesFromFirestore,
-} = require("./tradeStore");
-const { updateDailyStats } = require("./statsStore");
-
 let trades = [];
 
 async function loadOpenTrades() {
-  const openTrades = await getOpenTradesFromFirestore();
-  trades = openTrades;
-  console.log(`♻️ Firestore'dan ${trades.length} açık işlem yüklendi.`);
+  console.log("♻️ Firestore kapalı. Açık işlemler RAM'den takip edilecek.");
   return trades;
 }
 
@@ -35,14 +26,9 @@ async function createPaperTrade(symbol, signal, tradePlan) {
     leverage: tradePlan.leverage,
     score: signal.score,
     openedAt: new Date().toISOString(),
-    statsCountedOpen: true,
   };
 
   trades.push(trade);
-
-  await saveTrade(trade);
-  await updateDailyStats(trade);
-
   return trade;
 }
 
@@ -81,8 +67,6 @@ async function updatePaperTrades(symbol, currentPrice) {
       trade.pnlPercent = Number((rawPnl * trade.leverage).toFixed(2));
       trade.closedAt = new Date().toISOString();
 
-      await updateTrade(trade);
-      await updateDailyStats(trade);
       closed.push(trade);
     }
   }

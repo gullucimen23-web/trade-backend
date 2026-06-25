@@ -1,10 +1,5 @@
-const { getFirestore } = require("firebase-admin/firestore");
+// Firebase/Firestore yeni sistemde kullanılmıyor.
+// Eski require("./firebase") çağrıları kırılmasın diye boş db stub bırakıldı.
+const db = null;
 
-(async () => {
-  try {
-    const cols = await getFirestore().listCollections();
-    console.log("Collections:", cols.map(c => c.id));
-  } catch (e) {
-    console.error("LIST ERROR:", e);
-  }
-})();
+module.exports = { db };
