@@ -8,26 +8,19 @@ const {
 } = require("./telegram");
 const { buildTradePlan } = require("./risk");
 const { updatePaperTrades } = require("./paperTrade");
+const { calculatePnlPercent } = require("./riskManager");
 const { canOpenTrade } = require("./riskGuard");
 const { createApproval } = require("./approvalStore");
 const { isBotActive } = require("./botState");
 const {
   getActiveTrackedTradesBySymbol,
   closeTrackedTrade,
+  reduceTrackedTradeRisk,
 } = require("./trackStore");
 
 const SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
 let lastSignals = {};
 let lastFollowReportAt = {};
-
-function calculatePnlPercent(trade, currentPrice) {
-  const isLong = trade.side === "LONG";
-  const rawPnl = isLong
-    ? ((currentPrice - trade.entry) / trade.entry) * 100
-    : ((trade.entry - currentPrice) / trade.entry) * 100;
-
-  return Number((rawPnl * Number(trade.leverage || 1)).toFixed(2));
-}
 
 function distanceToPricePercent(currentPrice, targetPrice) {
   return Number(((Math.abs(targetPrice - currentPrice) / currentPrice) * 100).toFixed(2));
@@ -83,7 +76,25 @@ async function sendUserTrackedReports(symbol, signal, currentPrice) {
   const trackedTrades = getActiveTrackedTradesBySymbol(symbol);
 
   for (const trade of trackedTrades) {
-    const pnlPercent = calculatePnlPercent(trade, currentPrice);
+    const riskResult = reduceTrackedTradeRisk(trade, currentPrice);
+    const pnlPercent = riskResult.pnlPercent ?? calculatePnlPercent(trade, currentPrice);
+
+    for (const riskUpdate of riskResult.updates || []) {
+      await sendTelegram(
+        `
+🛡️ <b>Risk Azaltıldı</b>
+
+Parite: <b>${trade.symbol}</b>
+Yön: <b>${trade.side}</b>
+Anlık PnL: <b>%${riskUpdate.pnlPercent}</b>
+Eski SL: <b>${riskUpdate.oldStop}</b>
+Yeni SL: <b>${riskUpdate.newStop}</b>
+
+${riskUpdate.message}
+`,
+        trade.userId
+      );
+    }
 
     const isLong = trade.side === "LONG";
     const hitTp = isLong
@@ -118,7 +129,7 @@ PnL: <b>%${pnlPercent}</b>
 
     const now = Date.now();
     const lastAt = lastFollowReportAt[trade.id] || 0;
-    const intervalMs = Number(process.env.FOLLOW_REPORT_MINUTES || 10) * 60 * 1000;
+    const intervalMs = Number(process.env.FOLLOW_REPORT_MINUTES || 5) * 60 * 1000;
 
     if (now - lastAt < intervalMs) continue;
 
@@ -159,7 +170,24 @@ async function scanSymbol(symbol) {
     const signal = analyzeMarket(candles);
     const currentPrice = signal.lastClose;
 
-    const closedTrades = await updatePaperTrades(symbol, currentPrice);
+    const paperResult = await updatePaperTrades(symbol, currentPrice);
+    const closedTrades = paperResult.closed || [];
+    const paperRiskUpdates = paperResult.riskUpdates || [];
+
+    for (const item of paperRiskUpdates) {
+      const { trade, update } = item;
+      await sendTelegram(`
+🛡️ <b>Paper Trade Risk Azaltıldı</b>
+
+Parite: <b>${trade.symbol}</b>
+Yön: <b>${trade.side}</b>
+Anlık PnL: <b>%${update.pnlPercent}</b>
+Eski SL: <b>${update.oldStop}</b>
+Yeni SL: <b>${update.newStop}</b>
+
+${update.message}
+`);
+    }
 
     for (const closed of closedTrades) {
       await sendTelegram(`
@@ -265,20 +293,24 @@ ${signal.reasons.map((r) => `✅ ${r}`).join("\n")}
   }
 }
 
+async function runScannerOnce() {
+  if (!isBotActive()) {
+    console.log("⏸️ Bot durduruldu. Tarama yapılmadı.");
+    return;
+  }
+
+  console.log("Piyasa taranıyor...");
+
+  for (const symbol of SYMBOLS) {
+    await scanSymbol(symbol);
+  }
+}
+
 function startScanner() {
   console.log("📡 Scanner başlatıldı.");
-
-  cron.schedule("*/1 * * * *", async () => {
-    if (!isBotActive()) {
-      console.log("⏸️ Bot durduruldu. Tarama yapılmadı.");
-      return;
-    }
-
-    console.log("Piyasa taranıyor...");
-
-    for (const symbol of SYMBOLS) {
-      await scanSymbol(symbol);
-    }
+  runScannerOnce().catch((err) => console.error("İlk tarama hatası:", err.message));
+  cron.schedule("*/1 * * * *", () => {
+    runScannerOnce().catch((err) => console.error("Tarama döngüsü hatası:", err.message));
   });
 }
 

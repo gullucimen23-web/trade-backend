@@ -1,3 +1,5 @@
+const { applyRiskReduction, calculatePnlPercent } = require("./riskManager");
+
 let trades = [];
 
 async function loadOpenTrades() {
@@ -20,12 +22,15 @@ async function createPaperTrade(symbol, signal, tradePlan) {
     entry: tradePlan.entry,
     takeProfitPrice: tradePlan.takeProfitPrice,
     stopLossPrice: tradePlan.stopLossPrice,
+    initialStopLossPrice: tradePlan.stopLossPrice,
     takeProfitPercent: tradePlan.takeProfitPercent,
     stopLossPercent: tradePlan.stopLossPercent,
     positionSizePercent: tradePlan.positionSizePercent,
     leverage: tradePlan.leverage,
     score: signal.score,
     openedAt: new Date().toISOString(),
+    breakEvenActivated: false,
+    lockedProfitPercent: 0,
   };
 
   trades.push(trade);
@@ -42,9 +47,15 @@ function getAllTrades() {
 
 async function updatePaperTrades(symbol, currentPrice) {
   const closed = [];
+  const riskUpdates = [];
 
   for (const trade of trades) {
     if (trade.symbol !== symbol || trade.status !== "OPEN") continue;
+
+    const riskResult = applyRiskReduction(trade, currentPrice);
+    for (const update of riskResult.updates) {
+      riskUpdates.push({ trade, update });
+    }
 
     const isLong = trade.side === "LONG";
 
@@ -59,19 +70,13 @@ async function updatePaperTrades(symbol, currentPrice) {
     if (hitTp || hitSl) {
       trade.status = hitTp ? "CLOSED_TP" : "CLOSED_SL";
       trade.exit = currentPrice;
-
-      const rawPnl = isLong
-        ? ((currentPrice - trade.entry) / trade.entry) * 100
-        : ((trade.entry - currentPrice) / trade.entry) * 100;
-
-      trade.pnlPercent = Number((rawPnl * trade.leverage).toFixed(2));
+      trade.pnlPercent = calculatePnlPercent(trade, currentPrice);
       trade.closedAt = new Date().toISOString();
-
       closed.push(trade);
     }
   }
 
-  return closed;
+  return { closed, riskUpdates };
 }
 
 module.exports = {

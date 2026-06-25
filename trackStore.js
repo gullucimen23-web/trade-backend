@@ -1,3 +1,5 @@
+const { applyRiskReduction } = require("./riskManager");
+
 const trackedTrades = {};
 
 function createTrackedTradeFromApproval(approval, user) {
@@ -16,12 +18,15 @@ function createTrackedTradeFromApproval(approval, user) {
     entry: approval.entry,
     takeProfitPrice: approval.takeProfitPrice,
     stopLossPrice: approval.stopLossPrice,
+    initialStopLossPrice: approval.stopLossPrice,
     takeProfitPercent: approval.tradePlan?.takeProfitPercent,
     stopLossPercent: approval.tradePlan?.stopLossPercent,
     leverage: approval.tradePlan?.leverage || 1,
     status: "TRACKING",
     createdAt: new Date().toISOString(),
     lastReportAt: null,
+    breakEvenActivated: false,
+    lockedProfitPercent: 0,
   };
 
   trackedTrades[key] = tracked;
@@ -48,6 +53,10 @@ function closeTrackedTrade(tracked, status, currentPrice, pnlPercent) {
   return tracked;
 }
 
+function reduceTrackedTradeRisk(tracked, currentPrice) {
+  return applyRiskReduction(tracked, currentPrice);
+}
+
 function getTrackedTrades() {
   return Object.values(trackedTrades);
 }
@@ -64,6 +73,7 @@ module.exports = {
   createTrackedTradeFromApproval,
   stopTrackedTrade,
   closeTrackedTrade,
+  reduceTrackedTradeRisk,
   getTrackedTrades,
   getActiveTrackedTrades,
   getActiveTrackedTradesBySymbol,

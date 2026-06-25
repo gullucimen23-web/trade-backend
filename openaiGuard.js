@@ -9,6 +9,7 @@ let dailyCalls = 0;
 let monthlyCalls = 0;
 let lastDay = new Date().getDate();
 let lastMonth = new Date().getMonth();
+let lastLimitNoticeDay = null;
 
 function resetCountersIfNeeded() {
   const now = new Date();
@@ -16,6 +17,7 @@ function resetCountersIfNeeded() {
   if (now.getDate() !== lastDay) {
     dailyCalls = 0;
     lastDay = now.getDate();
+    lastLimitNoticeDay = null;
   }
 
   if (now.getMonth() !== lastMonth) {
@@ -29,11 +31,23 @@ function getOpenAIStats() {
 
   return {
     enabled: process.env.OPENAI_ENABLED === "true",
+    mode: "optional_technical_analysis_continues",
     dailyCalls,
     monthlyCalls,
     dailyLimit: Number(process.env.OPENAI_DAILY_MAX_CALLS || 20),
     monthlyLimit: Number(process.env.OPENAI_MONTHLY_MAX_CALLS || 500),
   };
+}
+
+async function notifyLimitOnce(message) {
+  const today = new Date().toISOString().slice(0, 10);
+  if (lastLimitNoticeDay === today) return;
+  lastLimitNoticeDay = today;
+  try {
+    await sendTelegram(message);
+  } catch (err) {
+    console.error("OpenAI limit bildirimi gönderilemedi:", err.message);
+  }
 }
 
 async function askOpenAIWithGuard(marketData) {
@@ -43,29 +57,32 @@ async function askOpenAIWithGuard(marketData) {
   const dailyLimit = Number(process.env.OPENAI_DAILY_MAX_CALLS || 20);
   const monthlyLimit = Number(process.env.OPENAI_MONTHLY_MAX_CALLS || 500);
 
-  if (!enabled) {
+  if (!enabled || !process.env.OPENAI_API_KEY) {
     return {
       allowed: false,
-      reason: "OpenAI kapalı",
+      reason: "OpenAI kapalı veya API key yok. Bot teknik analizle devam ediyor.",
       decision: "SKIP",
+      stats: getOpenAIStats(),
     };
   }
 
   if (dailyCalls >= dailyLimit) {
-    await sendTelegram("⚠️ OpenAI günlük limit doldu. Bot teknik analiz modunda devam ediyor.");
+    await notifyLimitOnce("⚠️ OpenAI günlük limit doldu. Bot durmadı, teknik analiz modunda devam ediyor.");
     return {
       allowed: false,
-      reason: "Günlük OpenAI limiti doldu",
+      reason: "Günlük OpenAI limiti doldu. Teknik analiz devam ediyor.",
       decision: "SKIP",
+      stats: getOpenAIStats(),
     };
   }
 
   if (monthlyCalls >= monthlyLimit) {
-    await sendTelegram("🚨 OpenAI aylık limit doldu. Bot teknik analiz modunda devam ediyor.");
+    await notifyLimitOnce("🚨 OpenAI aylık limit doldu. Bot durmadı, teknik analiz modunda devam ediyor.");
     return {
       allowed: false,
-      reason: "Aylık OpenAI limiti doldu",
+      reason: "Aylık OpenAI limiti doldu. Teknik analiz devam ediyor.",
       decision: "SKIP",
+      stats: getOpenAIStats(),
     };
   }
 
@@ -118,9 +135,10 @@ Cevabı sadece JSON ver:
 
     return {
       allowed: false,
-      reason: "OpenAI hata verdi",
+      reason: "OpenAI hata verdi. Bot teknik analizle devam ediyor.",
       error: err.message,
       decision: "SKIP",
+      stats: getOpenAIStats(),
     };
   }
 }

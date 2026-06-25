@@ -1,18 +1,5 @@
-// Firestore kaldırıldı. Bu dosya eski importlar hata vermesin diye RAM uyumlu stub olarak bırakıldı.
-async function saveTrade() {
-  return true;
-}
-
-async function updateTrade() {
-  return true;
-}
-
-async function getOpenTradesFromFirestore() {
-  return [];
-}
-
-module.exports = {
-  saveTrade,
-  updateTrade,
-  getOpenTradesFromFirestore,
-};
+// Firestore kaldırıldı. Bu dosya geriye dönük uyumluluk için boş stub olarak bırakıldı.
+async function saveTrade() { return null; }
+async function updateTrade() { return null; }
+async function getOpenTradesFromFirestore() { return []; }
+module.exports = { saveTrade, updateTrade, getOpenTradesFromFirestore };

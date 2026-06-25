@@ -6,8 +6,7 @@ const STATE_FILE = path.join(__dirname, "botState.json");
 function readState() {
   try {
     if (!fs.existsSync(STATE_FILE)) return { active: true };
-    const raw = fs.readFileSync(STATE_FILE, "utf8");
-    const parsed = JSON.parse(raw);
+    const parsed = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
     return { active: parsed.active !== false };
   } catch (err) {
     console.error("Bot state okunamadı, aktif başlatılıyor:", err.message);
@@ -17,10 +16,7 @@ function readState() {
 
 function writeState(active) {
   try {
-    fs.writeFileSync(
-      STATE_FILE,
-      JSON.stringify({ active, updatedAt: new Date().toISOString() }, null, 2)
-    );
+    fs.writeFileSync(STATE_FILE, JSON.stringify({ active }, null, 2));
   } catch (err) {
     console.error("Bot state yazılamadı:", err.message);
   }

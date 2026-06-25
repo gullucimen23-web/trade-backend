@@ -201,7 +201,7 @@ app.get("/status", (req, res) => {
     tradeMode: process.env.TRADE_MODE || "SPOT",
     autoMode: process.env.AUTO_MODE === "true",
     autoMinScore: Number(process.env.AUTO_MIN_SCORE || 95),
-    followReportMinutes: Number(process.env.FOLLOW_REPORT_MINUTES || 10),
+    followReportMinutes: Number(process.env.FOLLOW_REPORT_MINUTES || 5),
     openai: getOpenAIStats(),
     risk: getRiskStats(),
     approvals: getAllApprovals(),
@@ -280,10 +280,18 @@ async function startApp() {
   try {
     await loadOpenTrades();
   } catch (err) {
-    console.error("Açık işlem yükleme hatası, RAM ile devam:", err.message);
+    console.error("Açık işlem yüklenemedi, RAM ile devam:", err.message);
   }
 
   startScanner();
 }
+
+process.on("unhandledRejection", (err) => {
+  console.error("Yakalanmamış promise hatası:", err?.message || err);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("Yakalanmamış uygulama hatası:", err?.message || err);
+});
 
 startApp();
