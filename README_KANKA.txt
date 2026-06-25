@@ -1,26 +1,27 @@
-FALIX TRADE BOT - FIRESTORESUZ SÜRÜM
+FALIX TRADE V2 - CANLI POZISYON YONETICI
 
-Bu pakette Firestore/Firebase devre dışı bırakıldı.
-Bot artık sunucu açılınca otomatik AKTİF başlar ve sen /stop-bot diyene kadar çalışır.
+Bu surumun mantigi:
+- Firestore yok.
+- JSON kayit var: data/*.json
+- Bot 30 saniyede bir piyasayi tarar.
+- Acik pozisyonu 60 saniyede bir takip eder.
+- Risk gorurse normal sureyi beklemeden Telegram'a uyarir.
+- SL/TP dayatmaz; acik pozisyonu gidebildigi yere kadar tasimaya calisir.
+- Kar erimeye baslarsa: KARI KORU / CIKISA HAZIRLAN / SIMDI CIK der.
+- Ters yon guclenirse: SIMDI CIK / TERS YONE HAZIRLAN der.
 
-ÖNEMLİ:
-- .env ve Firebase service account JSON güvenlik için ZIP'e konmadı.
-- Render Environment Variables kısmındaki mevcut API keylerini kullanmaya devam et.
-- FIREBASE_SERVICE_ACCOUNT artık gerekli değil, silebilirsin.
-- Render restart olursa RAM'deki açık paper işlemler sıfırlanır.
-- Telegram sinyal, buton ve takip sistemi çalışır.
+Manuel pozisyon takip ornegi:
+https://SENIN-RENDER.onrender.com/track-now/BTCUSDT/SHORT?entry=59300&leverage=15&amount=100
 
-DEPLOY KOMUTLARI:
+Amount zorunlu degil. Yazarsan tahmini USDT kar/zarar hesaplar.
 
+Deploy:
 git add .
-git commit -m "Remove Firestore and keep bot active"
+git commit -m "Falix Trade v2 profit supervisor"
 git push origin main
 
-DURUM KONTROL:
-/status
+Render:
+Manual Deploy -> Clear build cache & deploy
 
-BOTU BAŞLAT:
-/start-bot
-
-BOTU DURDUR:
-/stop-bot
+Onemli:
+Garanti kar yok. Bu sistem riski erken yakalamak ve kari korumak icin tasarlandi.

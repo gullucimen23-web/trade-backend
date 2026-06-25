@@ -11,6 +11,12 @@ function calculatePnlPercent(trade, currentPrice) {
   return Number((rawPnl * Number(trade.leverage || 1)).toFixed(2));
 }
 
+function calculatePnlMoney(trade, pnlPercent) {
+  const amount = Number(trade.amount || trade.positionAmount || 0);
+  if (!amount) return null;
+  return Number(((amount * pnlPercent) / 100).toFixed(2));
+}
+
 function getScoresForTrade(trade, signal) {
   const sameSideScore = trade.side === "LONG"
     ? Number(signal.longScore || 0)
@@ -23,217 +29,206 @@ function getScoresForTrade(trade, signal) {
   return { sameSideScore, oppositeScore };
 }
 
-function improveTrackedRisk(trade, currentPrice, pnlPercent) {
+function updateBestRun(trade, currentPrice, pnlPercent) {
   const isLong = trade.side === "LONG";
-  const oldSl = Number(trade.activeStopLossPrice || trade.stopLossPrice);
-  let newSl = oldSl;
-  let message = null;
-
   const bestBefore = Number(trade.bestPrice || trade.entry);
   trade.bestPrice = isLong ? Math.max(bestBefore, currentPrice) : Math.min(bestBefore, currentPrice);
   trade.highestPnlPercent = Math.max(Number(trade.highestPnlPercent || 0), pnlPercent);
 
-  const setStopByProfit = (lockedProfitPercent, level, label) => {
-    const priceMove = lockedProfitPercent / Number(trade.leverage || 1) / 100;
-    const targetSl = isLong
-      ? trade.entry * (1 + priceMove)
-      : trade.entry * (1 - priceMove);
-
-    const better = isLong ? targetSl > newSl : targetSl < newSl;
-    if (better) {
-      newSl = roundPrice(targetSl);
-      trade.riskLevel = level;
-      message = label;
-    }
-  };
-
-  if (pnlPercent >= 0.6) setStopByProfit(0, "BREAK_EVEN", "SL giriş fiyatına çek. Zarar riski sıfıra yaklaşsın.");
-  if (pnlPercent >= 1.2) setStopByProfit(0.35, "LOCK_035", "Kârı koru. SL yaklaşık +%0.35 kâr bölgesine taşınabilir.");
-  if (pnlPercent >= 2.0) setStopByProfit(0.8, "LOCK_080", "Kâr koruma güçlendi. SL yaklaşık +%0.80 kâr bölgesine taşınabilir.");
-  if (pnlPercent >= 3.0) setStopByProfit(1.4, "TRAILING", "Trailing mantık aktif. Kârı bırakma, stopu fiyatla beraber taşı.");
-
-  if (newSl !== oldSl) {
-    trade.activeStopLossPrice = newSl;
-    trade.stopLossPrice = newSl;
-    trade.lastRiskMoveAt = new Date().toISOString();
-    trade.notes = Array.isArray(trade.notes) ? trade.notes : [];
-    trade.notes.push({ at: trade.lastRiskMoveAt, oldSl, newSl, pnlPercent, message });
-    return { changed: true, oldSl, newSl, message };
-  }
-
-  return { changed: false, oldSl, newSl, message: null };
+  const pullbackFromBest = Math.max(0, Number((Number(trade.highestPnlPercent || 0) - pnlPercent).toFixed(2)));
+  trade.lastPnlPercent = pnlPercent;
+  trade.lastPrice = Number(currentPrice);
+  trade.lastCheckedAt = new Date().toISOString();
+  return { pullbackFromBest };
 }
 
-function distanceToPricePercent(currentPrice, targetPrice) {
-  return Number(((Math.abs(targetPrice - currentPrice) / currentPrice) * 100).toFixed(2));
+function getTrendFlags(trade, signal) {
+  const isLong = trade.side === "LONG";
+  const emaBull = Number(signal.ema9 || 0) > Number(signal.ema21 || 0);
+  const emaBear = Number(signal.ema9 || 0) < Number(signal.ema21 || 0);
+  const macdSide = signal.macdSide || "NEUTRAL";
+  const rsi = Number(signal.rsi || 50);
+  const adx = Number(signal.adx || 0);
+
+  const sameEma = isLong ? emaBull : emaBear;
+  const oppositeEma = isLong ? emaBear : emaBull;
+  const sameMacd = isLong ? macdSide === "BULL" : macdSide === "BEAR";
+  const oppositeMacd = isLong ? macdSide === "BEAR" : macdSide === "BULL";
+  const sameRsi = isLong ? rsi >= 48 : rsi <= 52;
+  const dangerRsi = isLong ? rsi < 45 : rsi > 55;
+
+  return { sameEma, oppositeEma, sameMacd, oppositeMacd, sameRsi, dangerRsi, adx };
 }
 
 function getPositionAdvice(trade, signal, currentPrice, pnlPercent) {
   const { sameSideScore, oppositeScore } = getScoresForTrade(trade, signal);
-  const isLong = trade.side === "LONG";
-  const activeStop = Number(trade.activeStopLossPrice || trade.stopLossPrice);
-  const tp1 = Number(trade.tp1Price || trade.takeProfitPrice);
-  const tp2 = Number(trade.tp2Price || trade.takeProfitPrice);
-  const tp3 = Number(trade.tp3Price || trade.takeProfitPrice);
+  const { pullbackFromBest } = updateBestRun(trade, currentPrice, pnlPercent);
+  const flags = getTrendFlags(trade, signal);
+  const highest = Number(trade.highestPnlPercent || pnlPercent || 0);
+  const scoreGap = oppositeScore - sameSideScore;
 
-  const hitTp1 = isLong ? currentPrice >= tp1 : currentPrice <= tp1;
-  const hitTp2 = isLong ? currentPrice >= tp2 : currentPrice <= tp2;
-  const hitTp3 = isLong ? currentPrice >= tp3 : currentPrice <= tp3;
-  const hitSl = isLong ? currentPrice <= activeStop : currentPrice >= activeStop;
+  const hardReverse =
+    oppositeScore >= Number(process.env.REVERSAL_EXIT_SCORE || 85) &&
+    scoreGap >= Number(process.env.REVERSAL_GAP_EXIT || 12) &&
+    (flags.oppositeEma || flags.oppositeMacd);
 
-  if (hitSl) {
+  const reverseWarning =
+    oppositeScore >= Number(process.env.REVERSAL_WARN_SCORE || 75) &&
+    scoreGap >= Number(process.env.REVERSAL_GAP_WARN || 6);
+
+  const profitGivebackDanger =
+    highest >= 1.2 && pullbackFromBest >= Number(process.env.PROFIT_GIVEBACK_EXIT || 0.9);
+
+  const profitGivebackWarn =
+    highest >= 0.7 && pullbackFromBest >= Number(process.env.PROFIT_GIVEBACK_WARN || 0.45);
+
+  const momentumLost =
+    sameSideScore < 55 ||
+    (flags.oppositeEma && flags.oppositeMacd) ||
+    (pnlPercent < -0.6 && oppositeScore > sameSideScore);
+
+  if (hardReverse) {
     return {
       status: "EXIT_NOW",
-      icon: "🔴",
-      title: "ŞİMDİ ÇIK / SL ÇALIŞTI",
-      reason: "Fiyat aktif stop seviyesine geldi. Zararı büyütme.",
+      urgency: "CRITICAL",
+      icon: "🚨",
+      title: "ŞİMDİ ÇIK",
+      reason: "Ters yön net güçlendi. Mevcut pozisyon avantajını kaybetti.",
       sameSideScore,
       oppositeScore,
-      hitSl,
-      hitTp1,
-      hitTp2,
-      hitTp3,
-      reverseReady: oppositeScore >= 85,
-    };
-  }
-
-  if (oppositeScore >= 85 && oppositeScore >= sameSideScore + 12) {
-    return {
-      status: "EXIT_AND_REVERSE_WATCH",
-      icon: "🔴",
-      title: "ÇIK / TERS YÖNE HAZIRLAN",
-      reason: "Ters sinyal çok güçlendi. Mevcut pozisyon zayıflıyor.",
-      sameSideScore,
-      oppositeScore,
-      hitSl,
-      hitTp1,
-      hitTp2,
-      hitTp3,
+      pullbackFromBest,
       reverseReady: true,
+      nextSide: trade.side === "LONG" ? "SHORT" : "LONG",
     };
   }
 
-  if (oppositeScore >= 75 && oppositeScore > sameSideScore) {
+  if (profitGivebackDanger) {
     return {
-      status: "RISK_UP",
+      status: "PROFIT_EXIT",
+      urgency: "CRITICAL",
+      icon: "🔴",
+      title: "KÂRI KORU / ÇIK",
+      reason: "Pozisyon güzel kâr vermiş ama kâr geri erimeye başladı. Kârı masada bırakma.",
+      sameSideScore,
+      oppositeScore,
+      pullbackFromBest,
+      reverseReady: oppositeScore >= 78,
+      nextSide: trade.side === "LONG" ? "SHORT" : "LONG",
+    };
+  }
+
+  if (reverseWarning) {
+    return {
+      status: "PREPARE_EXIT",
+      urgency: "HIGH",
       icon: "🟠",
-      title: "RİSK ARTTI",
-      reason: "Ters yön güçleniyor. Pozisyonu küçült veya çıkışa hazırlan.",
+      title: "ÇIKIŞA HAZIRLAN",
+      reason: "Ters yön güçleniyor. Pozisyon kârda ise koru, zarardaysa büyütme.",
       sameSideScore,
       oppositeScore,
-      hitSl,
-      hitTp1,
-      hitTp2,
-      hitTp3,
+      pullbackFromBest,
       reverseReady: oppositeScore >= 82,
+      nextSide: trade.side === "LONG" ? "SHORT" : "LONG",
     };
   }
 
-  if (hitTp3 || pnlPercent >= 3.0) {
-    return {
-      status: "TAKE_PROFIT_STRONG",
-      icon: "🟢",
-      title: "KÂRI AL / TRAILING DEVAM",
-      reason: "Güçlü kâr bölgesi geldi. Kârı koru, ters sinyalde çık.",
-      sameSideScore,
-      oppositeScore,
-      hitSl,
-      hitTp1,
-      hitTp2,
-      hitTp3,
-      reverseReady: false,
-    };
-  }
-
-  if (hitTp2 || pnlPercent >= 1.5) {
+  if (profitGivebackWarn) {
     return {
       status: "PROTECT_PROFIT",
+      urgency: "HIGH",
       icon: "🟡",
       title: "KÂRI KORU",
-      reason: "İşlem kârda. SL kâra çekilip devam edilebilir.",
+      reason: "İşlem kârdaydı, geri çekilme başladı. Pozisyonu yakından izle.",
       sameSideScore,
       oppositeScore,
-      hitSl,
-      hitTp1,
-      hitTp2,
-      hitTp3,
+      pullbackFromBest,
       reverseReady: false,
     };
   }
 
-  if (hitTp1 || pnlPercent >= 0.6) {
-    return {
-      status: "CONTINUE_BREAK_EVEN",
-      icon: "🟢",
-      title: "DEVAM ET / SL GİRİŞE",
-      reason: "İşlem doğru yönde ilerliyor. Stopu girişe çekerek riski azalt.",
-      sameSideScore,
-      oppositeScore,
-      hitSl,
-      hitTp1,
-      hitTp2,
-      hitTp3,
-      reverseReady: false,
-    };
-  }
-
-  if (pnlPercent <= -0.5 || sameSideScore < 55) {
+  if (momentumLost) {
     return {
       status: "DANGER",
+      urgency: "HIGH",
       icon: "🔴",
-      title: "ZARAR RİSKİ VAR",
-      reason: "Pozisyon yönü yeterince güçlü değil. SL'ye sadık kal, ekleme yapma.",
+      title: "ZARAR RİSKİ ARTTI",
+      reason: "Pozisyon yönündeki momentum zayıfladı. Yeni ekleme yapma, çıkış için hazır ol.",
       sameSideScore,
       oppositeScore,
-      hitSl,
-      hitTp1,
-      hitTp2,
-      hitTp3,
+      pullbackFromBest,
       reverseReady: oppositeScore >= 75,
+      nextSide: trade.side === "LONG" ? "SHORT" : "LONG",
+    };
+  }
+
+  if (pnlPercent >= 2.0 && sameSideScore >= oppositeScore) {
+    return {
+      status: "RUN_WINNER",
+      urgency: "NORMAL",
+      icon: "🟢",
+      title: "DEVAM / KAZANANI TAŞI",
+      reason: "Pozisyon iyi kârda ve yön hâlâ korunuyor. Ters sinyal gelene kadar acele çıkma.",
+      sameSideScore,
+      oppositeScore,
+      pullbackFromBest,
+      reverseReady: false,
+    };
+  }
+
+  if (pnlPercent >= 0.5) {
+    return {
+      status: "CONTINUE_PROFIT",
+      urgency: "NORMAL",
+      icon: "🟢",
+      title: "DEVAM ET",
+      reason: "Pozisyon doğru yönde. Ters sinyal henüz onaylanmadı.",
+      sameSideScore,
+      oppositeScore,
+      pullbackFromBest,
+      reverseReady: false,
     };
   }
 
   return {
-    status: "CONTINUE",
-    icon: "🟢",
-    title: "DEVAM ET",
-    reason: "Pozisyon yönü hâlâ korunuyor. Plan dışına çıkma.",
+    status: "CONTINUE_WATCH",
+    urgency: "NORMAL",
+    icon: "👀",
+    title: "BEKLE / İZLE",
+    reason: "Pozisyon açık ama net çıkış sinyali yok. Yön bozulursa uyarı gelecek.",
     sameSideScore,
     oppositeScore,
-    hitSl,
-    hitTp1,
-    hitTp2,
-    hitTp3,
+    pullbackFromBest,
     reverseReady: false,
   };
 }
 
-function formatTradeReport(trade, signal, currentPrice, advice, pnlPercent) {
-  const activeStop = Number(trade.activeStopLossPrice || trade.stopLossPrice);
-  const tp1 = Number(trade.tp1Price || trade.takeProfitPrice);
-  const tp2 = Number(trade.tp2Price || trade.takeProfitPrice);
-  const tp3 = Number(trade.tp3Price || trade.takeProfitPrice);
+function formatMoney(value) {
+  if (value === null || value === undefined) return "-";
+  return `${value > 0 ? "+" : ""}${value} USDT`;
+}
 
+function formatTradeReport(trade, signal, currentPrice, advice, pnlPercent) {
+  const pnlMoney = calculatePnlMoney(trade, pnlPercent);
+  const amountText = Number(trade.amount || 0) > 0 ? `\nPozisyon: <b>${trade.amount} USDT</b>` : "";
   const reverseText = advice.reverseReady
-    ? `\n🔁 <b>Ters yön:</b> ${trade.side === "LONG" ? "SHORT" : "LONG"} hazırlığı var. Direkt atlama, yeni sinyal bekle.`
+    ? `\n🔁 <b>Ters yön:</b> ${advice.nextSide || (trade.side === "LONG" ? "SHORT" : "LONG")} güçleniyor. Çıkmadan ters işleme atlama; yeni onayı bekle.`
     : "";
 
   return `
-📊 <b>${trade.symbol} ${trade.side} CANLI TAKİP</b>
+📊 <b>${trade.symbol} ${trade.side} CANLI POZİSYON</b>${amountText}
 
 Giriş: <b>${trade.entry}</b>
 Şu An: <b>${currentPrice}</b>
 Kaldıraç: <b>${trade.leverage}x</b>
 PnL: <b>%${pnlPercent}</b>
-
-🎯 TP1: <b>${tp1}</b> — Uzaklık: <b>%${distanceToPricePercent(currentPrice, tp1)}</b>
-🎯 TP2: <b>${tp2}</b> — Uzaklık: <b>%${distanceToPricePercent(currentPrice, tp2)}</b>
-🎯 TP3: <b>${tp3}</b> — Uzaklık: <b>%${distanceToPricePercent(currentPrice, tp3)}</b>
-🛑 Aktif SL: <b>${activeStop}</b> — Uzaklık: <b>%${distanceToPricePercent(currentPrice, activeStop)}</b>
+Tahmini K/Z: <b>${formatMoney(pnlMoney)}</b>
+En iyi PnL: <b>%${Number(trade.highestPnlPercent || 0).toFixed(2)}</b>
+Geri verme: <b>%${Number(advice.pullbackFromBest || 0).toFixed(2)}</b>
 
 Pozisyon Gücü: <b>${advice.sameSideScore}/100</b>
 Ters Güç: <b>${advice.oppositeScore}/100</b>
 RSI: <b>${signal.rsi}</b> | ADX: <b>${signal.adx}</b>
+EMA: <b>${signal.ema9}</b> / <b>${signal.ema21}</b>
 
 ${advice.icon} <b>${advice.title}</b>
 ${advice.reason}${reverseText}
@@ -242,8 +237,8 @@ ${advice.reason}${reverseText}
 
 module.exports = {
   calculatePnlPercent,
-  improveTrackedRisk,
+  calculatePnlMoney,
+  updateBestRun,
   getPositionAdvice,
   formatTradeReport,
-  distanceToPricePercent,
 };

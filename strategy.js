@@ -1,5 +1,14 @@
 const { RSI, EMA, MACD, ADX } = require("technicalindicators");
 
+function safeLast(arr) {
+  return arr && arr.length ? arr[arr.length - 1] : null;
+}
+
+function pct(a, b) {
+  if (!b) return 0;
+  return ((a - b) / b) * 100;
+}
+
 function analyzeMarket(candles) {
   const closes = candles.map((c) => c.close);
   const highs = candles.map((c) => c.high);
@@ -7,11 +16,13 @@ function analyzeMarket(candles) {
   const volumes = candles.map((c) => c.volume);
 
   const lastClose = closes[closes.length - 1];
+  const prevClose = closes[closes.length - 2] || lastClose;
 
   const rsi = RSI.calculate({ values: closes, period: 14 });
   const ema9 = EMA.calculate({ values: closes, period: 9 });
   const ema21 = EMA.calculate({ values: closes, period: 21 });
   const ema50 = EMA.calculate({ values: closes, period: 50 });
+  const ema200 = EMA.calculate({ values: closes, period: 200 });
 
   const macd = MACD.calculate({
     values: closes,
@@ -22,104 +33,75 @@ function analyzeMarket(candles) {
     SimpleMASignal: false,
   });
 
-  const adx = ADX.calculate({
-    close: closes,
-    high: highs,
-    low: lows,
-    period: 14,
-  });
+  const adx = ADX.calculate({ close: closes, high: highs, low: lows, period: 14 });
 
-  const lastRsi = rsi[rsi.length - 1];
-  const lastEma9 = ema9[ema9.length - 1];
-  const lastEma21 = ema21[ema21.length - 1];
-  const lastEma50 = ema50[ema50.length - 1];
-  const lastMacd = macd[macd.length - 1];
-  const lastAdx = adx[adx.length - 1];
+  const lastRsi = safeLast(rsi) || 50;
+  const lastEma9 = safeLast(ema9) || lastClose;
+  const prevEma9 = ema9.length > 1 ? ema9[ema9.length - 2] : lastEma9;
+  const lastEma21 = safeLast(ema21) || lastClose;
+  const prevEma21 = ema21.length > 1 ? ema21[ema21.length - 2] : lastEma21;
+  const lastEma50 = safeLast(ema50) || lastClose;
+  const lastEma200 = safeLast(ema200) || lastEma50;
+  const lastMacd = safeLast(macd);
+  const prevMacd = macd.length > 1 ? macd[macd.length - 2] : lastMacd;
+  const lastAdx = safeLast(adx) || { adx: 0, pdi: 0, mdi: 0 };
 
   const recentHigh = Math.max(...highs.slice(-30));
   const recentLow = Math.min(...lows.slice(-30));
-
-  const avgVolume = volumes.slice(-20).reduce((a, b) => a + b, 0) / 20;
+  const avgVolume = volumes.slice(-20).reduce((a, b) => a + b, 0) / Math.min(20, volumes.length);
   const lastVolume = volumes[volumes.length - 1];
+  const volumeRatio = avgVolume ? lastVolume / avgVolume : 1;
+
+  const macdHistogram = lastMacd ? lastMacd.histogram : 0;
+  const prevHistogram = prevMacd ? prevMacd.histogram : macdHistogram;
+  const macdSide = !lastMacd ? "NEUTRAL" : lastMacd.MACD > lastMacd.signal ? "BULL" : "BEAR";
+  const macdImproving = macdHistogram > prevHistogram;
+  const emaBull = lastEma9 > lastEma21;
+  const emaBear = lastEma9 < lastEma21;
+  const emaSlopeUp = lastEma9 > prevEma9 && lastEma21 >= prevEma21;
+  const emaSlopeDown = lastEma9 < prevEma9 && lastEma21 <= prevEma21;
+  const priceMomentum = pct(lastClose, prevClose);
 
   let longScore = 0;
   let shortScore = 0;
   const longReasons = [];
   const shortReasons = [];
 
-  // LONG şartları
-  if (lastClose > lastEma50) {
-    longScore += 15;
-    longReasons.push("Fiyat EMA50 üstünde");
-  }
+  function addLong(points, reason) { longScore += points; longReasons.push(reason); }
+  function addShort(points, reason) { shortScore += points; shortReasons.push(reason); }
 
-  if (lastEma9 > lastEma21) {
-    longScore += 15;
-    longReasons.push("EMA9 EMA21 üstünde");
-  }
-
-  if (lastRsi > 38 && lastRsi < 65) {
-    longScore += 15;
-    longReasons.push("RSI long için sağlıklı");
-  }
-
-  if (lastMacd && lastMacd.MACD > lastMacd.signal) {
-    longScore += 15;
-    longReasons.push("MACD long pozitif");
-  }
-
-  if (lastAdx && lastAdx.adx > 20) {
-    longScore += 15;
-    longReasons.push(`ADX trend güçlü: ${lastAdx.adx.toFixed(2)}`);
-  }
-
-  if (lastVolume > avgVolume * 1.2) {
-    longScore += 15;
-    longReasons.push("Hacim güçlü");
-  }
+  if (lastClose > lastEma50) addLong(12, "Fiyat EMA50 üstünde");
+  if (lastClose > lastEma200) addLong(8, "Fiyat EMA200 üstünde");
+  if (emaBull) addLong(16, "EMA9 EMA21 üstünde");
+  if (emaSlopeUp) addLong(10, "EMA eğimi yukarı");
+  if (lastRsi > 45 && lastRsi < 68) addLong(13, "RSI long için sağlıklı");
+  if (lastRsi >= 52 && lastRsi <= 62) addLong(6, "RSI momentum long tarafında");
+  if (macdSide === "BULL") addLong(15, "MACD long pozitif");
+  if (macdImproving) addLong(6, "MACD histogram iyileşiyor");
+  if (lastAdx.adx > 18 && lastAdx.pdi > lastAdx.mdi) addLong(12, `ADX long trend destekli: ${lastAdx.adx.toFixed(2)}`);
+  if (volumeRatio > 1.15 && priceMomentum > 0) addLong(10, "Hacimli yukarı hareket");
 
   const breakoutDistance = ((recentHigh - lastClose) / lastClose) * 100;
-  if (breakoutDistance < 0.6) {
-    longScore += 10;
-    longReasons.push("Direnç kırılımına yakın");
-  }
+  if (breakoutDistance < 0.5) addLong(8, "Direnç kırılımına yakın");
+  if (lastClose > recentHigh * 0.998 && volumeRatio > 1.05) addLong(8, "Kırılım baskısı var");
 
-  // SHORT şartları
-  if (lastClose < lastEma50) {
-    shortScore += 15;
-    shortReasons.push("Fiyat EMA50 altında");
-  }
-
-  if (lastEma9 < lastEma21) {
-    shortScore += 15;
-    shortReasons.push("EMA9 EMA21 altında");
-  }
-
-  if (lastRsi > 35 && lastRsi < 62) {
-    shortScore += 15;
-    shortReasons.push("RSI short için uygun");
-  }
-
-  if (lastMacd && lastMacd.MACD < lastMacd.signal) {
-    shortScore += 15;
-    shortReasons.push("MACD short negatif");
-  }
-
-  if (lastAdx && lastAdx.adx > 20) {
-    shortScore += 15;
-    shortReasons.push(`ADX düşüş trendi güçlü: ${lastAdx.adx.toFixed(2)}`);
-  }
-
-  if (lastVolume > avgVolume * 1.2) {
-    shortScore += 15;
-    shortReasons.push("Hacim güçlü");
-  }
+  if (lastClose < lastEma50) addShort(12, "Fiyat EMA50 altında");
+  if (lastClose < lastEma200) addShort(8, "Fiyat EMA200 altında");
+  if (emaBear) addShort(16, "EMA9 EMA21 altında");
+  if (emaSlopeDown) addShort(10, "EMA eğimi aşağı");
+  if (lastRsi > 32 && lastRsi < 55) addShort(13, "RSI short için uygun");
+  if (lastRsi <= 48 && lastRsi >= 38) addShort(6, "RSI momentum short tarafında");
+  if (macdSide === "BEAR") addShort(15, "MACD short negatif");
+  if (!macdImproving) addShort(6, "MACD histogram zayıflıyor");
+  if (lastAdx.adx > 18 && lastAdx.mdi > lastAdx.pdi) addShort(12, `ADX short trend destekli: ${lastAdx.adx.toFixed(2)}`);
+  if (volumeRatio > 1.15 && priceMomentum < 0) addShort(10, "Hacimli aşağı hareket");
 
   const breakdownDistance = ((lastClose - recentLow) / lastClose) * 100;
-  if (breakdownDistance < 0.6) {
-    shortScore += 10;
-    shortReasons.push("Destek kırılımına yakın");
-  }
+  if (breakdownDistance < 0.5) addShort(8, "Destek kırılımına yakın");
+  if (lastClose < recentLow * 1.002 && volumeRatio > 1.05) addShort(8, "Aşağı kırılım baskısı var");
+
+  longScore = Math.min(100, Math.round(longScore));
+  shortScore = Math.min(100, Math.round(shortScore));
 
   let action = "WAIT";
   let score = 0;
@@ -128,25 +110,24 @@ function analyzeMarket(candles) {
 
   if (longScore >= shortScore) {
     score = longScore;
-    side = "LONG";
+    side = score >= 55 ? "LONG" : "NONE";
     reasons = longReasons;
-
-    if (score >= 90) action = "PRO_LONG";
-    else if (score >= 80) action = "STRONG_LONG";
-    else if (score >= 65) action = "WATCH_LONG";
+    if (score >= 92) action = "PRO_LONG";
+    else if (score >= 85) action = "STRONG_LONG";
+    else if (score >= 70) action = "WATCH_LONG";
   } else {
     score = shortScore;
-    side = "SHORT";
+    side = score >= 55 ? "SHORT" : "NONE";
     reasons = shortReasons;
-
-    if (score >= 90) action = "PRO_SHORT";
-    else if (score >= 80) action = "STRONG_SHORT";
-    else if (score >= 65) action = "WATCH_SHORT";
+    if (score >= 92) action = "PRO_SHORT";
+    else if (score >= 85) action = "STRONG_SHORT";
+    else if (score >= 70) action = "WATCH_SHORT";
   }
 
-  if (score < 65) {
+  if (score < 55) {
     action = "WAIT";
     side = "NONE";
+    reasons = ["Net yön yok, işlem için bekle"];
   }
 
   return {
@@ -155,14 +136,20 @@ function analyzeMarket(candles) {
     score,
     longScore,
     shortScore,
-    lastClose,
-    rsi: Number(lastRsi?.toFixed(2)),
-    ema9: Number(lastEma9?.toFixed(2)),
-    ema21: Number(lastEma21?.toFixed(2)),
-    trendEma: Number(lastEma50?.toFixed(2)),
-    adx: Number(lastAdx?.adx?.toFixed(2)),
-    volume: Number(lastVolume?.toFixed(2)),
-    avgVolume: Number(avgVolume?.toFixed(2)),
+    lastClose: Number(lastClose.toFixed(4)),
+    rsi: Number(Number(lastRsi).toFixed(2)),
+    ema9: Number(Number(lastEma9).toFixed(4)),
+    ema21: Number(Number(lastEma21).toFixed(4)),
+    trendEma: Number(Number(lastEma50).toFixed(4)),
+    ema200: Number(Number(lastEma200).toFixed(4)),
+    macdSide,
+    macdHistogram: Number(Number(macdHistogram).toFixed(4)),
+    adx: Number(Number(lastAdx.adx || 0).toFixed(2)),
+    pdi: Number(Number(lastAdx.pdi || 0).toFixed(2)),
+    mdi: Number(Number(lastAdx.mdi || 0).toFixed(2)),
+    volume: Number(Number(lastVolume).toFixed(2)),
+    avgVolume: Number(Number(avgVolume).toFixed(2)),
+    volumeRatio: Number(Number(volumeRatio).toFixed(2)),
     resistance: Number(recentHigh.toFixed(4)),
     support: Number(recentLow.toFixed(4)),
     breakoutDistance: Number(breakoutDistance.toFixed(2)),

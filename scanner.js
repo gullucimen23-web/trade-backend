@@ -1,4 +1,3 @@
-const cron = require("node-cron");
 const { getKlines } = require("./binance");
 const { analyzeMarket } = require("./strategy");
 const { askOpenAIWithGuard } = require("./openaiGuard");
@@ -8,119 +7,86 @@ const { updatePaperTrades } = require("./paperTrade");
 const { canOpenTrade } = require("./riskGuard");
 const { createApproval } = require("./approvalStore");
 const { isBotActive } = require("./botState");
-const {
-  getActiveTrackedTradesBySymbol,
-  closeTrackedTrade,
-  saveTrackedTrade,
-} = require("./trackStore");
-const {
-  calculatePnlPercent,
-  improveTrackedRisk,
-  getPositionAdvice,
-  formatTradeReport,
-} = require("./positionAdvisor");
+const { getActiveTrackedTradesBySymbol, closeTrackedTrade, saveTrackedTrade } = require("./trackStore");
+const { calculatePnlPercent, getPositionAdvice, formatTradeReport } = require("./positionAdvisor");
 
 const SYMBOLS = (process.env.SYMBOLS || "BTCUSDT,ETHUSDT,SOLUSDT")
-  .split(",")
-  .map((s) => s.trim().toUpperCase())
-  .filter(Boolean);
+  .split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
 
 let lastSignals = {};
 let lastFollowReportAt = {};
 let lastMarketSummaryAt = 0;
 let latestSignals = {};
+let scanRunning = false;
 
 function getSignalLevel(score) {
-  if (score >= 95) return "🔥 ULTRA";
-  if (score >= 85) return "🚀 İŞLEM";
+  if (score >= 92) return "🔥 ÇOK GÜÇLÜ";
+  if (score >= 85) return "🚀 İŞLEM ADAYI";
   if (score >= 70) return "⚠️ HAZIRLIK";
   if (score >= 55) return "👀 İZLEME";
   return "⏳ BEKLE";
 }
 
+function shouldSendUrgent(trade, advice) {
+  if (!["CRITICAL", "HIGH"].includes(advice.urgency)) return false;
+  const now = Date.now();
+  const lastAt = trade.lastUrgentAt ? new Date(trade.lastUrgentAt).getTime() : 0;
+  const minGap = Number(process.env.URGENT_REPEAT_SECONDS || 90) * 1000;
+  return trade.lastUrgentStatus !== advice.status || now - lastAt > minGap;
+}
+
 async function sendUserTrackedReports(symbol, signal, currentPrice) {
   const trackedTrades = getActiveTrackedTradesBySymbol(symbol);
-
   for (const trade of trackedTrades) {
     const pnlPercent = calculatePnlPercent(trade, currentPrice);
-    const riskMove = improveTrackedRisk(trade, currentPrice, pnlPercent);
+    const advice = getPositionAdvice(trade, signal, currentPrice, pnlPercent);
     saveTrackedTrade(trade);
 
-    if (riskMove.changed) {
-      await sendTelegram(
-        `
-🛡️ <b>Risk Azaltıldı</b>
-
-Parite: <b>${trade.symbol}</b>
-Yön: <b>${trade.side}</b>
-PnL: <b>%${pnlPercent}</b>
-
-Eski SL: <b>${riskMove.oldSl}</b>
-Yeni SL: <b>${riskMove.newSl}</b>
-
-${riskMove.message}
-`,
-        trade.userId
-      );
-    }
-
-    const advice = getPositionAdvice(trade, signal, currentPrice, pnlPercent);
-
-    if (advice.hitSl || advice.status === "EXIT_NOW") {
-      closeTrackedTrade(trade, "CLOSED_SL", currentPrice, pnlPercent);
-      await sendTelegram(formatTradeReport(trade, signal, currentPrice, advice, pnlPercent), trade.userId);
-      continue;
-    }
-
-    if (advice.hitTp3 && advice.oppositeScore >= 70) {
-      closeTrackedTrade(trade, "CLOSED_TP3", currentPrice, pnlPercent);
-      await sendTelegram(formatTradeReport(trade, signal, currentPrice, advice, pnlPercent), trade.userId);
-      continue;
-    }
-
+    const urgent = shouldSendUrgent(trade, advice);
     const now = Date.now();
     const lastAt = lastFollowReportAt[trade.id] || 0;
-    const intervalMs = Number(process.env.FOLLOW_REPORT_MINUTES || 5) * 60 * 1000;
+    const intervalMs = Number(process.env.FOLLOW_REPORT_SECONDS || 60) * 1000;
 
-    const urgent = ["EXIT_AND_REVERSE_WATCH", "RISK_UP", "DANGER"].includes(advice.status);
-    if (!urgent && now - lastAt < intervalMs) continue;
+    if (urgent) {
+      trade.lastUrgentStatus = advice.status;
+      trade.lastUrgentAt = new Date().toISOString();
+      saveTrackedTrade(trade);
+      await sendTelegram(formatTradeReport(trade, signal, currentPrice, advice, pnlPercent), trade.userId);
+      if (["EXIT_NOW", "PROFIT_EXIT"].includes(advice.status) && process.env.AUTO_CLOSE_ON_EXIT_SIGNAL === "true") {
+        closeTrackedTrade(trade, advice.status, currentPrice, pnlPercent);
+      }
+      continue;
+    }
 
-    lastFollowReportAt[trade.id] = now;
-    await sendTelegram(formatTradeReport(trade, signal, currentPrice, advice, pnlPercent), trade.userId);
+    if (now - lastAt >= intervalMs) {
+      lastFollowReportAt[trade.id] = now;
+      await sendTelegram(formatTradeReport(trade, signal, currentPrice, advice, pnlPercent), trade.userId);
+    }
   }
 }
 
 function buildSignalMessage(symbol, signal, tradePlan) {
   return `
-🚀 <b>FALIX İŞLEM PLANI</b>
+🚀 <b>FALIX SİNYAL ADAYI</b>
 
 Parite: <b>${symbol}</b>
 Yön: <b>${signal.side}</b>
-Aksiyon: <b>${signal.action}</b>
 Skor: <b>${signal.score}/100</b>
 Seviye: <b>${getSignalLevel(signal.score)}</b>
+Fiyat: <b>${signal.lastClose}</b>
 
-⚡ Kaldıraç: <b>${tradePlan.leverage}x</b>
-💰 Giriş: <b>${tradePlan.entryLow} - ${tradePlan.entryHigh}</b>
+📌 <b>Not:</b> Bot SL/TP dayatmaz. İşlemi açarsan canlı takip eder; yön bozulunca “çık / kârı koru / ters yöne hazırlan” diye uyarır.
 
-🎯 TP1: <b>${tradePlan.tp1Price}</b> (%${tradePlan.tp1Percent})
-🎯 TP2: <b>${tradePlan.tp2Price}</b> (%${tradePlan.tp2Percent})
-🎯 TP3: <b>${tradePlan.tp3Price}</b> (%${tradePlan.tp3Percent})
-🛑 SL: <b>${tradePlan.stopLossPrice}</b> (%${tradePlan.stopLossPercent})
-
-📌 Yönetim:
-TP1 gelirse SL girişe çek.
-TP2 gelirse kârı koru.
-Ters sinyal güçlenirse bot “çık / ters yöne hazırlan” diyecek.
-
+Long Güç: <b>${signal.longScore}</b>
+Short Güç: <b>${signal.shortScore}</b>
 RSI: ${signal.rsi}
-EMA9: ${signal.ema9}
-EMA21: ${signal.ema21}
-Trend EMA: ${signal.trendEma}
+EMA9/21: ${signal.ema9} / ${signal.ema21}
+MACD: ${signal.macdSide}
 ADX: ${signal.adx}
+Hacim: x${signal.volumeRatio}
 
 Sebep:
-${signal.reasons.map((r) => `✅ ${r}`).join("\n")}
+${signal.reasons.slice(0, 6).map((r) => `✅ ${r}`).join("\n")}
 
 İşlem açtıysan butona bas, canlı takip başlayacak.
 `;
@@ -135,7 +101,7 @@ async function sendMarketSummaryIfNeeded() {
   const rows = SYMBOLS.map((symbol) => {
     const signal = latestSignals[symbol];
     if (!signal) return `${symbol}: veri bekleniyor`;
-    const direction = signal.side && signal.side !== "NONE" ? signal.side : signal.action;
+    const direction = signal.side && signal.side !== "NONE" ? signal.side : "BEKLE";
     return `${symbol}: ${getSignalLevel(signal.score)} | ${direction} | Skor ${signal.score} | L:${signal.longScore} S:${signal.shortScore}`;
   }).join("\n");
 
@@ -144,97 +110,74 @@ async function sendMarketSummaryIfNeeded() {
 
 ${rows}
 
-Not: 85+ skor gelirse işlem planı atılır. Açtığın işlem varsa bot özelden canlı takip eder.
+Açık pozisyon varsa bot her ${process.env.FOLLOW_REPORT_SECONDS || 60} saniyede takip eder; riskte anında uyarır.
 `);
 }
 
 async function scanSymbol(symbol) {
-  try {
-    const candles = await getKlines(symbol, "5m", 100);
-    const signal = analyzeMarket(candles);
-    const currentPrice = signal.lastClose;
-    latestSignals[symbol] = signal;
+  const candles = await getKlines(symbol, process.env.SCAN_INTERVAL || "5m", 220);
+  const signal = analyzeMarket(candles);
+  const currentPrice = signal.lastClose;
+  latestSignals[symbol] = signal;
 
-    const closedTrades = await updatePaperTrades(symbol, currentPrice);
-    for (const closed of closedTrades) {
-      await sendTelegram(`
-✅ <b>Paper Trade Kapandı</b>
-
-Parite: <b>${closed.symbol}</b>
-Yön: <b>${closed.side}</b>
-Durum: <b>${closed.status}</b>
-Giriş: <b>${closed.entry}</b>
-Çıkış: <b>${closed.exit}</b>
-PnL: <b>%${closed.pnlPercent}</b>
-`);
-    }
-
-    await sendUserTrackedReports(symbol, signal, currentPrice);
-
-    const signalThreshold = Number(process.env.SIGNAL_THRESHOLD || 85);
-    if (signal.score < signalThreshold || !signal.side || signal.side === "NONE") return;
-
-    const signalKey = `${symbol}_${signal.action}_${Math.round(signal.lastClose)}_${Math.floor(signal.score / 5)}`;
-    if (lastSignals[symbol] === signalKey) return;
-    lastSignals[symbol] = signalKey;
-
-    const riskCheck = canOpenTrade();
-    if (!riskCheck.allowed) {
-      console.log(`⛔ İşlem açılmadı: ${riskCheck.reason}`);
-      return;
-    }
-
-    const tradePlan = buildTradePlan(symbol, signal);
-    const approval = createApproval(symbol, signal, tradePlan);
-
-    await askOpenAIWithGuard({
-      symbol,
-      signalScore: signal.score,
-      action: signal.action,
-      side: signal.side,
-      price: signal.lastClose,
-      rsi: signal.rsi,
-      ema9: signal.ema9,
-      ema21: signal.ema21,
-      trendEma: signal.trendEma,
-      volume: signal.volume,
-      avgVolume: signal.avgVolume,
-      reasons: signal.reasons,
-      tradePlan,
-    });
-
-    await sendTelegramWithButtons(buildSignalMessage(symbol, signal, tradePlan), [
-      [{ text: "✅ Açtım / Canlı Takibe Al", callback_data: `TRACK:${symbol}:${approval.id}` }],
-      [{ text: "❌ Açmadım", callback_data: `IGNORE:${symbol}:${approval.id}` }],
-    ]);
-
-    console.log("✅ Butonlu işlem planı gönderildi:", symbol, signal.action, signal.score);
-  } catch (err) {
-    console.error(`${symbol} tarama hatası:`, err.message);
+  const closedTrades = await updatePaperTrades(symbol, currentPrice);
+  for (const closed of closedTrades) {
+    await sendTelegram(`✅ <b>Paper Trade Kapandı</b>\n${closed.symbol} ${closed.side}\nPnL: <b>%${closed.pnlPercent}</b>`);
   }
-}
 
-async function runScanCycle() {
-  if (!isBotActive()) {
-    console.log("⏸️ Bot durduruldu. Tarama yapılmadı.");
+  await sendUserTrackedReports(symbol, signal, currentPrice);
+
+  const signalThreshold = Number(process.env.SIGNAL_THRESHOLD || 85);
+  if (signal.score < signalThreshold || !signal.side || signal.side === "NONE") return;
+
+  const signalKey = `${symbol}_${signal.side}_${Math.round(signal.lastClose)}_${Math.floor(signal.score / 5)}`;
+  if (lastSignals[symbol] === signalKey) return;
+  lastSignals[symbol] = signalKey;
+
+  const riskCheck = canOpenTrade();
+  if (!riskCheck.allowed) {
+    console.log(`⛔ İşlem açılmadı: ${riskCheck.reason}`);
     return;
   }
 
-  console.log("Piyasa taranıyor...");
+  const tradePlan = buildTradePlan(symbol, signal);
+  const approval = createApproval(symbol, signal, tradePlan);
 
-  for (const symbol of SYMBOLS) {
-    await scanSymbol(symbol);
+  askOpenAIWithGuard({ symbol, signal, tradePlan }).catch((err) => {
+    console.error("OpenAI arka plan hatası:", err.message);
+  });
+
+  await sendTelegramWithButtons(buildSignalMessage(symbol, signal, tradePlan), [
+    [{ text: "✅ Açtım / Canlı Takibe Al", callback_data: `TRACK:${symbol}:${approval.id}` }],
+    [{ text: "❌ Açmadım", callback_data: `IGNORE:${symbol}:${approval.id}` }],
+  ]);
+
+  console.log("✅ Sinyal adayı gönderildi:", symbol, signal.side, signal.score);
+}
+
+async function runScanCycle() {
+  if (scanRunning) return;
+  scanRunning = true;
+  try {
+    if (!isBotActive()) {
+      console.log("⏸️ Bot durduruldu. Tarama yapılmadı.");
+      return;
+    }
+    console.log("Piyasa taranıyor...");
+    for (const symbol of SYMBOLS) {
+      try { await scanSymbol(symbol); } catch (err) { console.error(`${symbol} tarama hatası:`, err.message); }
+    }
+    await sendMarketSummaryIfNeeded();
+  } finally {
+    scanRunning = false;
   }
-
-  await sendMarketSummaryIfNeeded();
 }
 
 function startScanner() {
   console.log("📡 Scanner başlatıldı.");
   runScanCycle().catch((err) => console.error("İlk tarama hatası:", err.message));
-  cron.schedule("*/1 * * * *", async () => {
-    await runScanCycle();
-  });
+  const seconds = Math.max(15, Number(process.env.SCAN_EVERY_SECONDS || 30));
+  setInterval(() => runScanCycle().catch((err) => console.error("Tarama döngüsü hatası:", err.message)), seconds * 1000);
 }
 
 module.exports = { startScanner };
