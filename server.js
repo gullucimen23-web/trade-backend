@@ -13,6 +13,7 @@ const { isBotActive, startBot, stopBot, getBotState } = require("./botState");
 const { getApproval, approveTrade, rejectTrade, getAllApprovals } = require("./approvalStore");
 const {
   createTrackedTradeFromApproval,
+  createManualTrackedTrade,
   stopTrackedTrade,
   getTrackedTrades,
   getActiveTrackedTrades,
@@ -71,7 +72,9 @@ app.post("/telegram-webhook", async (req, res) => {
 Parite: <b>${tracked.symbol}</b>
 Yön: <b>${tracked.side}</b>
 Giriş: <b>${tracked.entry}</b>
-TP: <b>${tracked.takeProfitPrice}</b>
+TP1: <b>${tracked.tp1Price || tracked.takeProfitPrice}</b>
+TP2: <b>${tracked.tp2Price || tracked.takeProfitPrice}</b>
+TP3: <b>${tracked.tp3Price || tracked.takeProfitPrice}</b>
 SL: <b>${tracked.stopLossPrice}</b>
 
 Not: Özel mesajların gelmesi için botu özelden /start yapmış olman gerekebilir.
@@ -180,6 +183,51 @@ app.get("/test-binance", async (req, res) => {
 app.get("/paper/open", (req, res) => res.json({ ok: true, trades: getOpenTrades() }));
 app.get("/paper/all", (req, res) => res.json({ ok: true, trades: getAllTrades() }));
 app.get("/risk", (req, res) => res.json({ ok: true, stats: getRiskStats() }));
+
+
+app.get("/track-now/:symbol/:side", async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const side = req.params.side.toUpperCase();
+    const entry = Number(req.query.entry);
+    const leverage = Number(req.query.leverage || process.env.DEFAULT_LEVERAGE || 10);
+    const userId = String(req.query.userId || process.env.TELEGRAM_CHAT_ID || "");
+
+    if (!["LONG", "SHORT"].includes(side)) {
+      return res.status(400).json({ ok: false, error: "side LONG veya SHORT olmalı" });
+    }
+
+    if (!entry || Number.isNaN(entry)) {
+      return res.status(400).json({ ok: false, error: "entry gerekli. Örnek: /track-now/BTCUSDT/SHORT?entry=59300&leverage=15" });
+    }
+
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "TELEGRAM_CHAT_ID yok veya userId query olarak verilmedi" });
+    }
+
+    const tracked = createManualTrackedTrade({ symbol, side, entry, leverage, userId });
+
+    await sendTelegram(`
+✅ <b>Manuel İşlem Canlı Takibe Alındı</b>
+
+Parite: <b>${tracked.symbol}</b>
+Yön: <b>${tracked.side}</b>
+Giriş: <b>${tracked.entry}</b>
+Kaldıraç: <b>${tracked.leverage}x</b>
+
+🎯 TP1: <b>${tracked.tp1Price}</b>
+🎯 TP2: <b>${tracked.tp2Price}</b>
+🎯 TP3: <b>${tracked.tp3Price}</b>
+🛑 SL: <b>${tracked.stopLossPrice}</b>
+
+Bot artık bu işlemi canlı takip edecek.
+`, userId);
+
+    res.json({ ok: true, tracked });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
 
 app.get("/tracked", (req, res) => {
   res.json({
