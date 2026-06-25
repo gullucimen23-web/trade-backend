@@ -1,21 +1,9 @@
-const { RSI, EMA, MACD, ADX, ATR } = require("technicalindicators");
+const { RSI, EMA, MACD, ADX, ATR, BollingerBands } = require("technicalindicators");
 
-function safeLast(arr) {
-  return arr && arr.length ? arr[arr.length - 1] : null;
-}
-
-function pct(a, b) {
-  if (!b) return 0;
-  return ((a - b) / b) * 100;
-}
-
-function clamp(n, min, max) {
-  return Math.max(min, Math.min(max, n));
-}
-
-function round(n, d = 2) {
-  return Number(Number(n || 0).toFixed(d));
-}
+function safeLast(arr) { return arr && arr.length ? arr[arr.length - 1] : null; }
+function pct(a, b) { if (!b) return 0; return ((a - b) / b) * 100; }
+function clamp(n, min, max) { return Math.max(min, Math.min(max, n)); }
+function round(n, d = 2) { return Number(Number(n || 0).toFixed(d)); }
 
 function scoreToAction(side, score, entryApproved) {
   if (!side || side === "NONE" || score < 55) return { action: "WAIT", side: "NONE" };
@@ -24,10 +12,60 @@ function scoreToAction(side, score, entryApproved) {
     if (score >= 55) return { action: `OBSERVE_${side}`, side };
     return { action: "WAIT", side: "NONE" };
   }
-  if (score >= 92) return { action: `PRO_${side}`, side };
-  if (score >= 85) return { action: `STRONG_${side}`, side };
-  if (score >= 70) return { action: `WATCH_${side}`, side };
+  if (score >= 94) return { action: `PRO_${side}`, side };
+  if (score >= 88) return { action: `STRONG_${side}`, side };
+  if (score >= 78) return { action: `WATCH_${side}`, side };
   return { action: "WAIT", side: "NONE" };
+}
+
+function detectMarketRegime({ adx, atrPercent, volumeRatio, ema9, ema21, ema50, ema200, lastClose, bbWidthPercent }) {
+  if (volumeRatio < 0.45) return { regime: "DEAD_VOLUME", label: "Hacimsiz / ölü piyasa", risk: "HIGH", allowEntry: false };
+  if (atrPercent > 1.8) return { regime: "HIGH_VOLATILITY", label: "Aşırı oynak", risk: "HIGH", allowEntry: false };
+  if (bbWidthPercent < 0.45 && adx < 20) return { regime: "SQUEEZE", label: "Sıkışma", risk: "MEDIUM", allowEntry: false };
+  if (adx < 18) return { regime: "RANGE", label: "Yatay / kararsız", risk: "MEDIUM", allowEntry: false };
+
+  const bullStack = lastClose > ema50 && ema50 > ema200 && ema9 > ema21;
+  const bearStack = lastClose < ema50 && ema50 < ema200 && ema9 < ema21;
+  if (adx >= 22 && (bullStack || bearStack)) return { regime: "TREND", label: bullStack ? "Yukarı trend" : "Aşağı trend", risk: "LOW", allowEntry: true };
+  return { regime: "MIXED", label: "Karışık ama takip edilebilir", risk: "MEDIUM", allowEntry: true };
+}
+
+function buildGuide(signal) {
+  const price = signal.lastClose;
+  const longTrigger = signal.resistance;
+  const shortTrigger = signal.support;
+  const volumeNeed = Number(process.env.MIN_ENTRY_VOLUME_RATIO || 0.85);
+  const direction = signal.side && signal.side !== "NONE" ? signal.side : "NONE";
+  const next = [];
+
+  if (direction === "LONG") {
+    next.push(`LONG için ${longTrigger} üstü 5m kapanış ve hacim x${volumeNeed}+ beklenir.`);
+    next.push(`${signal.ema21} altına sarkma long fikrini zayıflatır.`);
+  } else if (direction === "SHORT") {
+    next.push(`SHORT için ${shortTrigger} altı 5m kapanış ve hacim x${volumeNeed}+ beklenir.`);
+    next.push(`${signal.ema21} üstüne atma short fikrini zayıflatır.`);
+  } else {
+    next.push(`LONG için ${longTrigger} üstü hacimli kapanış bekle.`);
+    next.push(`SHORT için ${shortTrigger} altı hacimli kapanış bekle.`);
+  }
+
+  let decision = "BEKLE";
+  if (signal.entryApproved) decision = `${direction} GİRİŞ ONAYI`;
+  else if (signal.entryBlocked) decision = `${direction} HAZIRLIK / GİRİŞ YOK`;
+
+  return { decision, price, next, summary: `${signal.marketRegime?.label || "Piyasa"} | Hacim x${signal.volumeRatio} | Güven ${signal.confidence}%` };
+}
+
+function calculateConfidence({ score, entryApproved, volumeRatio, marketRegime, mtfOk, breakoutConfirmed, breakdownConfirmed, side }) {
+  let c = Number(score || 0);
+  if (!entryApproved) c -= 15;
+  if (volumeRatio < 0.85) c -= 15;
+  if (volumeRatio < 0.55) c -= 15;
+  if (marketRegime && marketRegime.allowEntry === false) c -= 18;
+  if (!mtfOk) c -= 10;
+  if (side === "LONG" && !breakoutConfirmed) c -= 7;
+  if (side === "SHORT" && !breakdownConfirmed) c -= 7;
+  return clamp(Math.round(c), 0, 100);
 }
 
 function analyzeMarket(candles, options = {}) {
@@ -36,7 +74,6 @@ function analyzeMarket(candles, options = {}) {
   const highs = candles.map((c) => c.high);
   const lows = candles.map((c) => c.low);
   const volumes = candles.map((c) => c.volume);
-
   const lastClose = closes[closes.length - 1];
   const prevClose = closes[closes.length - 2] || lastClose;
 
@@ -46,16 +83,8 @@ function analyzeMarket(candles, options = {}) {
   const ema50 = EMA.calculate({ values: closes, period: 50 });
   const ema200 = EMA.calculate({ values: closes, period: 200 });
   const atr = ATR.calculate({ high: highs, low: lows, close: closes, period: 14 });
-
-  const macd = MACD.calculate({
-    values: closes,
-    fastPeriod: 12,
-    slowPeriod: 26,
-    signalPeriod: 9,
-    SimpleMAOscillator: false,
-    SimpleMASignal: false,
-  });
-
+  const bb = BollingerBands.calculate({ period: 20, values: closes, stdDev: 2 });
+  const macd = MACD.calculate({ values: closes, fastPeriod: 12, slowPeriod: 26, signalPeriod: 9, SimpleMAOscillator: false, SimpleMASignal: false });
   const adx = ADX.calculate({ close: closes, high: highs, low: lows, period: 14 });
 
   const lastRsi = safeLast(rsi) || 50;
@@ -69,8 +98,9 @@ function analyzeMarket(candles, options = {}) {
   const prevMacd = macd.length > 1 ? macd[macd.length - 2] : lastMacd;
   const lastAdx = safeLast(adx) || { adx: 0, pdi: 0, mdi: 0 };
   const lastAtr = safeLast(atr) || 0;
+  const lastBb = safeLast(bb);
+  const bbWidthPercent = lastBb ? ((lastBb.upper - lastBb.lower) / lastClose) * 100 : 0;
 
-  // Direnç/destek mevcut mumu dahil etmeden hesaplanır. Bu sayede "direnç kırılmadan PRO_LONG" hatası azalır.
   const lookbackHighs = highs.slice(-31, -1);
   const lookbackLows = lows.slice(-31, -1);
   const recentHigh = lookbackHighs.length ? Math.max(...lookbackHighs) : Math.max(...highs.slice(-30));
@@ -78,7 +108,6 @@ function analyzeMarket(candles, options = {}) {
   const avgVolume = volumes.slice(-20).reduce((a, b) => a + b, 0) / Math.min(20, volumes.length);
   const lastVolume = volumes[volumes.length - 1];
   const volumeRatio = avgVolume ? lastVolume / avgVolume : 1;
-
   const macdHistogram = lastMacd ? lastMacd.histogram : 0;
   const prevHistogram = prevMacd ? prevMacd.histogram : macdHistogram;
   const macdSide = !lastMacd ? "NEUTRAL" : lastMacd.MACD > lastMacd.signal ? "BULL" : "BEAR";
@@ -89,103 +118,99 @@ function analyzeMarket(candles, options = {}) {
   const emaSlopeDown = lastEma9 < prevEma9 && lastEma21 <= prevEma21;
   const priceMomentum = pct(lastClose, prevClose);
   const atrPercent = lastClose ? (lastAtr / lastClose) * 100 : 0;
+  const marketRegime = detectMarketRegime({ adx: lastAdx.adx || 0, atrPercent, volumeRatio, ema9: lastEma9, ema21: lastEma21, ema50: lastEma50, ema200: lastEma200, lastClose, bbWidthPercent });
 
-  let longScore = 0;
-  let shortScore = 0;
-  const longReasons = [];
-  const shortReasons = [];
-  const filters = [];
+  let longScore = 0, shortScore = 0;
+  const longReasons = [], shortReasons = [], filters = [];
+  const addLong = (p, r) => { longScore += p; longReasons.push(r); };
+  const addShort = (p, r) => { shortScore += p; shortReasons.push(r); };
+  const filter = (r) => filters.push(r);
 
-  function addLong(points, reason) { longScore += points; longReasons.push(reason); }
-  function addShort(points, reason) { shortScore += points; shortReasons.push(reason); }
-  function filter(reason) { filters.push(reason); }
-
-  if (lastClose > lastEma50) addLong(10, "Fiyat EMA50 üstünde");
+  if (lastClose > lastEma50) addLong(9, "Fiyat EMA50 üstünde");
   if (lastClose > lastEma200) addLong(8, "Fiyat EMA200 üstünde");
-  if (emaBull) addLong(14, "EMA9 EMA21 üstünde");
+  if (emaBull) addLong(13, "EMA9 EMA21 üstünde");
   if (emaSlopeUp) addLong(8, "EMA eğimi yukarı");
-  if (lastRsi > 45 && lastRsi < 67) addLong(10, "RSI long için sağlıklı");
+  if (lastRsi > 45 && lastRsi < 66) addLong(9, "RSI long için sağlıklı");
   if (lastRsi >= 52 && lastRsi <= 62) addLong(5, "RSI momentum long tarafında");
-  if (macdSide === "BULL") addLong(12, "MACD long pozitif");
+  if (macdSide === "BULL") addLong(11, "MACD long pozitif");
   if (macdImproving) addLong(5, "MACD histogram iyileşiyor");
-  if (lastAdx.adx > 20 && lastAdx.pdi > lastAdx.mdi) addLong(12, `ADX long trend destekli: ${lastAdx.adx.toFixed(2)}`);
+  if (lastAdx.adx > 21 && lastAdx.pdi > lastAdx.mdi) addLong(11, `ADX long trend destekli: ${lastAdx.adx.toFixed(2)}`);
   if (volumeRatio > 1.05 && priceMomentum > 0) addLong(8, "Hacimli yukarı hareket");
   if (volumeRatio > 1.35 && priceMomentum > 0) addLong(5, "Güçlü hacim onayı");
 
   const breakoutDistance = ((recentHigh - lastClose) / lastClose) * 100;
-  const breakoutConfirmed = lastClose > recentHigh && volumeRatio >= 0.9;
-  if (breakoutDistance > 0 && breakoutDistance < 0.5) addLong(4, "Dirence yakın, kırılım bekleniyor");
-  if (breakoutConfirmed) addLong(12, "Direnç üstü kapanış / kırılım onayı");
+  const breakoutConfirmed = lastClose > recentHigh && volumeRatio >= Number(process.env.BREAKOUT_VOLUME_RATIO || 0.95);
+  if (breakoutDistance > 0 && breakoutDistance < 0.5) addLong(3, "Dirence yakın, kırılım bekleniyor");
+  if (breakoutConfirmed) addLong(14, "Direnç üstü kapanış / kırılım onayı");
 
-  if (lastClose < lastEma50) addShort(10, "Fiyat EMA50 altında");
+  if (lastClose < lastEma50) addShort(9, "Fiyat EMA50 altında");
   if (lastClose < lastEma200) addShort(8, "Fiyat EMA200 altında");
-  if (emaBear) addShort(14, "EMA9 EMA21 altında");
+  if (emaBear) addShort(13, "EMA9 EMA21 altında");
   if (emaSlopeDown) addShort(8, "EMA eğimi aşağı");
-  if (lastRsi > 33 && lastRsi < 55) addShort(10, "RSI short için uygun");
+  if (lastRsi > 34 && lastRsi < 55) addShort(9, "RSI short için uygun");
   if (lastRsi <= 48 && lastRsi >= 38) addShort(5, "RSI momentum short tarafında");
-  if (macdSide === "BEAR") addShort(12, "MACD short negatif");
+  if (macdSide === "BEAR") addShort(11, "MACD short negatif");
   if (!macdImproving) addShort(5, "MACD histogram zayıflıyor");
-  if (lastAdx.adx > 20 && lastAdx.mdi > lastAdx.pdi) addShort(12, `ADX short trend destekli: ${lastAdx.adx.toFixed(2)}`);
+  if (lastAdx.adx > 21 && lastAdx.mdi > lastAdx.pdi) addShort(11, `ADX short trend destekli: ${lastAdx.adx.toFixed(2)}`);
   if (volumeRatio > 1.05 && priceMomentum < 0) addShort(8, "Hacimli aşağı hareket");
   if (volumeRatio > 1.35 && priceMomentum < 0) addShort(5, "Güçlü satış hacmi onayı");
 
   const breakdownDistance = ((lastClose - recentLow) / lastClose) * 100;
-  const breakdownConfirmed = lastClose < recentLow && volumeRatio >= 0.9;
-  if (breakdownDistance > 0 && breakdownDistance < 0.5) addShort(4, "Desteğe yakın, kırılım bekleniyor");
-  if (breakdownConfirmed) addShort(12, "Destek altı kapanış / kırılım onayı");
+  const breakdownConfirmed = lastClose < recentLow && volumeRatio >= Number(process.env.BREAKOUT_VOLUME_RATIO || 0.95);
+  if (breakdownDistance > 0 && breakdownDistance < 0.5) addShort(3, "Desteğe yakın, kırılım bekleniyor");
+  if (breakdownConfirmed) addShort(14, "Destek altı kapanış / kırılım onayı");
 
-  // Aşırı zayıf hacim aktif girişe engeldir. Piyasa doğru yönde görünse bile sinyali WATCH'a düşürür.
-  const weakVolume = volumeRatio < Number(process.env.MIN_ENTRY_VOLUME_RATIO || 0.85);
-  const veryWeakVolume = volumeRatio < 0.7;
+  const minVol = Number(process.env.MIN_ENTRY_VOLUME_RATIO || 0.85);
+  const weakVolume = volumeRatio < minVol;
+  const veryWeakVolume = volumeRatio < 0.55;
   if (weakVolume) filter(`Hacim zayıf x${volumeRatio.toFixed(2)} — aktif giriş engellendi`);
-  if (veryWeakVolume) {
-    longScore -= 12;
-    shortScore -= 12;
-  }
+  if (marketRegime.allowEntry === false) filter(`Piyasa rejimi: ${marketRegime.label} — giriş engellendi`);
+  if (veryWeakVolume) { longScore -= 18; shortScore -= 18; }
 
-  // Direnç/destek tam dibinde kırılım yoksa agresif PRO sinyal verme.
-  const longBlockedByResistance = breakoutDistance > 0 && breakoutDistance < 0.75 && !breakoutConfirmed;
-  const shortBlockedBySupport = breakdownDistance > 0 && breakdownDistance < 0.75 && !breakdownConfirmed;
+  const longBlockedByResistance = breakoutDistance > 0 && breakoutDistance < Number(process.env.NEAR_LEVEL_BLOCK_PERCENT || 0.8) && !breakoutConfirmed;
+  const shortBlockedBySupport = breakdownDistance > 0 && breakdownDistance < Number(process.env.NEAR_LEVEL_BLOCK_PERCENT || 0.8) && !breakdownConfirmed;
   if (longBlockedByResistance) filter(`LONG için direnç ${recentHigh.toFixed(4)} üstü kapanış bekleniyor`);
   if (shortBlockedBySupport) filter(`SHORT için destek ${recentLow.toFixed(4)} altı kapanış bekleniyor`);
 
   longScore = clamp(Math.round(longScore), 0, 100);
   shortScore = clamp(Math.round(shortScore), 0, 100);
-
   let side = longScore >= shortScore ? "LONG" : "SHORT";
   let rawScore = side === "LONG" ? longScore : shortScore;
   let reasons = side === "LONG" ? longReasons : shortReasons;
-  let entryApproved = rawScore >= Number(process.env.ENTRY_APPROVAL_SCORE || 85);
+  let entryApproved = rawScore >= Number(process.env.ENTRY_APPROVAL_SCORE || 88);
 
-  if (weakVolume) entryApproved = false;
+  if (weakVolume || marketRegime.allowEntry === false) entryApproved = false;
   if (side === "LONG" && longBlockedByResistance) entryApproved = false;
   if (side === "SHORT" && shortBlockedBySupport) entryApproved = false;
   if (side === "LONG" && macdSide === "BEAR" && !macdImproving) entryApproved = false;
   if (side === "SHORT" && macdSide === "BULL" && macdImproving) entryApproved = false;
 
-  // Filtreye takılan yüksek skorlar kullanıcıyı yanıltmasın diye görünür skoru da kırpıyoruz.
+  // En sert güvenlik: aktif giriş için ya kırılım onayı ya da çok net trend + hacim gerekir.
+  const cleanTrendLong = side === "LONG" && lastClose > lastEma50 && lastEma50 >= lastEma200 * 0.998 && emaBull && emaSlopeUp && lastAdx.pdi > lastAdx.mdi && volumeRatio >= 0.95;
+  const cleanTrendShort = side === "SHORT" && lastClose < lastEma50 && lastEma50 <= lastEma200 * 1.002 && emaBear && emaSlopeDown && lastAdx.mdi > lastAdx.pdi && volumeRatio >= 0.95;
+  if (side === "LONG" && !breakoutConfirmed && !cleanTrendLong) entryApproved = false;
+  if (side === "SHORT" && !breakdownConfirmed && !cleanTrendShort) entryApproved = false;
+
   let score = rawScore;
   if (!entryApproved && rawScore >= 85) score = Math.min(rawScore, 78);
-  if (!entryApproved && weakVolume) score = Math.min(score, 72);
-  if (!entryApproved && veryWeakVolume) score = Math.min(score, 66);
+  if (!entryApproved && weakVolume) score = Math.min(score, 68);
+  if (!entryApproved && veryWeakVolume) score = Math.min(score, 58);
+  if (!entryApproved && marketRegime.allowEntry === false) score = Math.min(score, 62);
 
-  if (score < 55) {
-    side = "NONE";
-    reasons = ["Net yön yok, işlem için bekle"];
-    entryApproved = false;
-  }
-
+  if (score < 55) { side = "NONE"; reasons = ["Net yön yok, işlem için bekle"]; entryApproved = false; }
   const actionData = scoreToAction(side, score, entryApproved);
 
-  return {
+  const base = {
     action: actionData.action,
     side: actionData.side,
     score,
     rawScore,
+    confidence: calculateConfidence({ score, entryApproved, volumeRatio, marketRegime, mtfOk: true, breakoutConfirmed, breakdownConfirmed, side }),
     entryApproved,
     entryBlocked: !entryApproved && side !== "NONE",
     filters,
     timeframe,
+    marketRegime,
     longScore,
     shortScore,
     lastClose: round(lastClose, 4),
@@ -204,6 +229,7 @@ function analyzeMarket(candles, options = {}) {
     volumeRatio: round(volumeRatio, 2),
     atr: round(lastAtr, 4),
     atrPercent: round(atrPercent, 2),
+    bbWidthPercent: round(bbWidthPercent, 2),
     resistance: round(recentHigh, 4),
     support: round(recentLow, 4),
     breakoutDistance: round(breakoutDistance, 2),
@@ -212,13 +238,14 @@ function analyzeMarket(candles, options = {}) {
     breakdownConfirmed,
     reasons,
   };
+  base.guide = buildGuide(base);
+  return base;
 }
 
 function sameDirectionScore(signal, side) {
   if (!signal || !side || side === "NONE") return 0;
   return side === "LONG" ? Number(signal.longScore || 0) : Number(signal.shortScore || 0);
 }
-
 function oppositeDirectionScore(signal, side) {
   if (!signal || !side || side === "NONE") return 0;
   return side === "LONG" ? Number(signal.shortScore || 0) : Number(signal.longScore || 0);
@@ -227,36 +254,33 @@ function oppositeDirectionScore(signal, side) {
 function applyMultiTimeframeFilter(primary, mid, high) {
   const result = { ...primary, mtf: { mid, high }, mtfFilters: [] };
   if (!primary || primary.side === "NONE") return result;
-
   const side = primary.side;
   const midSame = sameDirectionScore(mid, side);
   const highSame = sameDirectionScore(high, side);
   const midOpp = oppositeDirectionScore(mid, side);
   const highOpp = oppositeDirectionScore(high, side);
-
-  const midRejects = midOpp >= 65 && midOpp > midSame + 8;
-  const highRejects = highOpp >= 60 && highOpp > highSame + 8;
-  const midConfirms = midSame >= Number(process.env.MTF_MID_CONFIRM_SCORE || 55) && midSame >= midOpp;
+  const midRejects = midOpp >= 62 && midOpp > midSame + 7;
+  const highRejects = highOpp >= 58 && highOpp > highSame + 7;
+  const midConfirms = midSame >= Number(process.env.MTF_MID_CONFIRM_SCORE || 58) && midSame >= midOpp;
   const highNotAgainst = !highRejects;
+  const mtfOk = midConfirms && highNotAgainst && !midRejects;
 
-  result.mtfSummary = {
-    midSame, highSame, midOpp, highOpp, midConfirms, highNotAgainst,
-  };
-
+  result.mtfSummary = { midSame, highSame, midOpp, highOpp, midConfirms, highNotAgainst, mtfOk };
   if (!midConfirms) result.mtfFilters.push(`15m aynı yön teyidi zayıf (${midSame}/${midOpp})`);
   if (midRejects) result.mtfFilters.push(`15m ters yön baskısı güçlü (${midOpp})`);
   if (highRejects) result.mtfFilters.push(`1h ters yön baskısı var (${highOpp})`);
 
-  if (result.mtfFilters.length) {
+  if (!mtfOk) {
     result.entryApproved = false;
     result.entryBlocked = true;
-    result.score = Math.min(Number(result.score || 0), 74);
+    result.score = Math.min(Number(result.score || 0), 70);
+    result.confidence = calculateConfidence({ score: result.score, entryApproved: false, volumeRatio: result.volumeRatio, marketRegime: result.marketRegime, mtfOk: false, breakoutConfirmed: result.breakoutConfirmed, breakdownConfirmed: result.breakdownConfirmed, side });
     result.action = result.score >= 55 ? `WATCH_${side}` : "WAIT";
     result.filters = [...(result.filters || []), ...result.mtfFilters];
   } else if (result.entryApproved && result.score >= 85) {
     result.filters = [...(result.filters || []), "5m + 15m uyumlu, 1h ters baskı yok"];
   }
-
+  result.guide = buildGuide(result);
   return result;
 }
 

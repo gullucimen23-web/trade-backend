@@ -5,7 +5,7 @@ const { sendTelegram, answerCallbackQuery, setTelegramWebhook } = require("./tel
 const { askOpenAIWithGuard, getOpenAIStats } = require("./openaiGuard");
 const { getKlines, getPrice } = require("./binance");
 const { analyzeMarket, analyzeMultiTimeframe } = require("./strategy");
-const { startScanner } = require("./scanner");
+const { startScanner, runScanCycle, getLatestSignals, getOpportunityRadar, getOpportunityRadarText } = require("./scanner");
 const { getSpotAccount } = require("./binancePrivate");
 const { loadOpenTrades, getOpenTrades, getAllTrades, createPaperTrade } = require("./paperTrade");
 const { getRiskStats, registerTradeOpen } = require("./riskGuard");
@@ -241,6 +241,35 @@ app.get("/track-stop/:symbol", async (req, res) => {
     if (!stopped) return res.status(404).json({ ok: false, error: "Takip edilen işlem bulunamadı" });
     await sendTelegram(`🛑 <b>${symbol}</b> canlı takip durduruldu.`, userId);
     res.json({ ok: true, stopped });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/market-status", (req, res) => {
+  res.json({ ok: true, signals: getLatestSignals(), opportunities: getOpportunityRadar() });
+});
+
+app.get("/opportunities", (req, res) => {
+  res.json({ ok: true, opportunities: getOpportunityRadar() });
+});
+
+app.get("/radar", async (req, res) => {
+  try {
+    const text = getOpportunityRadarText();
+    if (req.query.send === "1" || req.query.telegram === "1") {
+      await sendTelegram(text);
+    }
+    res.type("text/plain").send(text.replace(/<[^>]+>/g, ""));
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/scan-now", async (req, res) => {
+  try {
+    await runScanCycle();
+    res.json({ ok: true, message: "Tarama tamamlandı", signals: getLatestSignals() });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }

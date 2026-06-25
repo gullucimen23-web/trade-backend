@@ -9,6 +9,7 @@ const { createApproval } = require("./approvalStore");
 const { isBotActive } = require("./botState");
 const { getActiveTrackedTradesBySymbol, closeTrackedTrade, saveTrackedTrade } = require("./trackStore");
 const { calculatePnlPercent, getPositionAdvice, formatTradeReport } = require("./positionAdvisor");
+const { buildOpportunityList, formatOpportunityTable } = require("./opportunityEngine");
 
 const SYMBOLS = (process.env.SYMBOLS || "BTCUSDT,ETHUSDT,SOLUSDT")
   .split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
@@ -16,8 +17,10 @@ const SYMBOLS = (process.env.SYMBOLS || "BTCUSDT,ETHUSDT,SOLUSDT")
 let lastSignals = {};
 let lastFollowReportAt = {};
 let lastMarketSummaryAt = 0;
+let lastOpportunityRadarAt = 0;
 let latestSignals = {};
 let scanRunning = false;
+let lastWatchAlerts = {};
 
 function getSignalLevel(score) {
   if (score >= 92) return "🔥 ÇOK GÜÇLÜ";
@@ -65,6 +68,63 @@ async function sendUserTrackedReports(symbol, signal, currentPrice) {
   }
 }
 
+
+function getWatchKey(symbol, signal) {
+  const side = signal.side && signal.side !== "NONE" ? signal.side : "NONE";
+  const bucket = Math.floor(Number(signal.score || 0) / 5) * 5;
+  const trigger = side === "LONG" ? signal.resistance : signal.support;
+  return `${symbol}_${side}_${bucket}_${Math.round(Number(trigger || 0))}`;
+}
+
+function shouldSendWatchAlert(symbol, signal) {
+  if (!signal || !signal.side || signal.side === "NONE") return false;
+  if (signal.entryApproved) return false;
+  const minScore = Number(process.env.WATCH_ALERT_SCORE || 60);
+  if (Number(signal.score || 0) < minScore) return false;
+
+  const key = getWatchKey(symbol, signal);
+  const now = Date.now();
+  const lastAt = lastWatchAlerts[key] || 0;
+  const cooldownMs = Number(process.env.WATCH_ALERT_COOLDOWN_SECONDS || 180) * 1000;
+  if (now - lastAt < cooldownMs) return false;
+
+  lastWatchAlerts[key] = now;
+  return true;
+}
+
+function buildWatchMessage(symbol, signal) {
+  const side = signal.side && signal.side !== "NONE" ? signal.side : "BEKLE";
+  const trigger = side === "LONG" ? signal.resistance : signal.support;
+  const triggerText = side === "LONG"
+    ? `LONG için <b>${trigger}</b> üstü hacimli 5m kapanış bekleniyor.`
+    : side === "SHORT"
+      ? `SHORT için <b>${trigger}</b> altı hacimli 5m kapanış bekleniyor.`
+      : `Net yön yok; kırılım bekleniyor.`;
+
+  return `
+👀 <b>${symbol} HAZIRLIK / İZLEME</b>
+
+Yön Adayı: <b>${side}</b>
+Skor: <b>${signal.score}/100</b>
+Güven: <b>${signal.confidence || signal.score}%</b>
+Piyasa: <b>${signal.marketRegime?.label || "-"}</b>
+Fiyat: <b>${signal.lastClose}</b>
+Hacim: <b>x${signal.volumeRatio}</b>
+
+Karar: <b>ŞİMDİ GİRME — ONAY BEKLE</b>
+${triggerText}
+
+📌 <b>Neyi bekliyoruz?</b>
+${signal.guide?.next?.map((r) => `• ${r}`).join("\n") || "• Hacimli kırılım / net yön teyidi"}
+
+${signal.filters?.length ? `⛔ <b>Engeller:</b>\n${signal.filters.slice(0, 4).map((r) => `• ${r}`).join("\n")}` : ""}
+
+Sebep:
+${signal.reasons.slice(0, 5).map((r) => `✅ ${r}`).join("\n")}
+
+Bot onay gelirse ayrıca <b>giriş onayı</b> gönderecek.`;
+}
+
 function buildSignalMessage(symbol, signal, tradePlan) {
   return `
 🚀 <b>FALIX SİNYAL ADAYI</b>
@@ -73,6 +133,8 @@ Parite: <b>${symbol}</b>
 Yön: <b>${signal.side}</b>
 Skor: <b>${signal.score}/100</b>
 Seviye: <b>${getSignalLevel(signal.score)}</b>
+Güven: <b>${signal.confidence || signal.score}%</b>
+Piyasa: <b>${signal.marketRegime?.label || "-"}</b>
 Fiyat: <b>${signal.lastClose}</b>
 
 📌 <b>Not:</b> Bot SL/TP dayatmaz. İşlemi açarsan canlı takip eder; yön bozulunca “çık / kârı koru / ters yöne hazırlan” diye uyarır.
@@ -84,7 +146,11 @@ EMA9/21: ${signal.ema9} / ${signal.ema21}
 MACD: ${signal.macdSide}
 ADX: ${signal.adx}
 Hacim: x${signal.volumeRatio}
+Karar: <b>${signal.guide?.decision || (signal.entryApproved ? "GİRİŞ ONAYI" : "BEKLE")}</b>
 Giriş Onayı: <b>${signal.entryApproved ? "VAR" : "YOK / BEKLE"}</b>
+
+🎯 <b>Beklenen şartlar:</b>
+${signal.guide?.next?.map((r) => `• ${r}`).join("\n") || "Bekle"}
 ${signal.filters?.length ? `
 Filtre:
 ${signal.filters.slice(0, 4).map((r) => `⛔ ${r}`).join("\n")}` : ""}
@@ -98,24 +164,32 @@ ${signal.reasons.slice(0, 6).map((r) => `✅ ${r}`).join("\n")}
 
 async function sendMarketSummaryIfNeeded() {
   const intervalMs = Number(process.env.MARKET_SUMMARY_MINUTES || 10) * 60 * 1000;
+  const radarMs = Number(process.env.OPPORTUNITY_RADAR_MINUTES || 15) * 60 * 1000;
   const now = Date.now();
-  if (now - lastMarketSummaryAt < intervalMs) return;
-  lastMarketSummaryAt = now;
 
-  const rows = SYMBOLS.map((symbol) => {
-    const signal = latestSignals[symbol];
-    if (!signal) return `${symbol}: veri bekleniyor`;
-    const direction = signal.side && signal.side !== "NONE" ? signal.side : "BEKLE";
-    return `${symbol}: ${getSignalLevel(signal.score)} | ${direction} | Skor ${signal.score} | L:${signal.longScore} S:${signal.shortScore}`;
-  }).join("\n");
+  if (now - lastMarketSummaryAt >= intervalMs) {
+    lastMarketSummaryAt = now;
+    const rows = SYMBOLS.map((symbol) => {
+      const signal = latestSignals[symbol];
+      if (!signal) return `${symbol}: veri bekleniyor`;
+      const direction = signal.side && signal.side !== "NONE" ? signal.side : "BEKLE";
+      const regime = signal.marketRegime?.label || "-";
+      return `${symbol}: ${getSignalLevel(signal.score)} | ${direction} | Skor ${signal.score} | L:${signal.longScore} S:${signal.shortScore} | Hacim x${signal.volumeRatio} | ${regime}`;
+    }).join("\n");
 
-  await sendTelegram(`
+    await sendTelegram(`
 📊 <b>Piyasa Durum Raporu</b>
 
 ${rows}
 
 Açık pozisyon varsa bot her ${process.env.FOLLOW_REPORT_SECONDS || 60} saniyede takip eder; riskte anında uyarır.
 `);
+  }
+
+  if (process.env.OPPORTUNITY_RADAR_ENABLED !== "false" && now - lastOpportunityRadarAt >= radarMs) {
+    lastOpportunityRadarAt = now;
+    await sendTelegram(formatOpportunityTable(latestSignals));
+  }
 }
 
 async function scanSymbol(symbol) {
@@ -143,6 +217,10 @@ async function scanSymbol(symbol) {
     signal.side === "NONE" ||
     signal.entryApproved === false
   ) {
+    if (shouldSendWatchAlert(symbol, signal)) {
+      await sendTelegram(buildWatchMessage(symbol, signal));
+      console.log("👀 Hazırlık uyarısı gönderildi:", symbol, signal.side, signal.score);
+    }
     if (signal.entryBlocked) {
       console.log(`⏳ ${symbol} izleniyor ama giriş yok: ${signal.filters?.join(" | ")}`);
     }
@@ -199,4 +277,8 @@ function startScanner() {
   setInterval(() => runScanCycle().catch((err) => console.error("Tarama döngüsü hatası:", err.message)), seconds * 1000);
 }
 
-module.exports = { startScanner };
+function getLatestSignals() { return latestSignals; }
+function getOpportunityRadar() { return buildOpportunityList(latestSignals); }
+function getOpportunityRadarText() { return formatOpportunityTable(latestSignals); }
+
+module.exports = { startScanner, runScanCycle, getLatestSignals, getOpportunityRadar, getOpportunityRadarText };
