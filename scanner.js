@@ -8,19 +8,71 @@ const {
 } = require("./telegram");
 const { buildTradePlan } = require("./risk");
 const { updatePaperTrades } = require("./paperTrade");
-const { calculatePnlPercent } = require("./riskManager");
 const { canOpenTrade } = require("./riskGuard");
 const { createApproval } = require("./approvalStore");
 const { isBotActive } = require("./botState");
 const {
   getActiveTrackedTradesBySymbol,
   closeTrackedTrade,
-  reduceTrackedTradeRisk,
+  saveTrackedTrade,
 } = require("./trackStore");
 
 const SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
 let lastSignals = {};
 let lastFollowReportAt = {};
+
+function calculatePnlPercent(trade, currentPrice) {
+  const isLong = trade.side === "LONG";
+  const rawPnl = isLong
+    ? ((currentPrice - trade.entry) / trade.entry) * 100
+    : ((trade.entry - currentPrice) / trade.entry) * 100;
+
+  return Number((rawPnl * Number(trade.leverage || 1)).toFixed(2));
+}
+
+
+function improveTrackedRisk(trade, currentPrice, pnlPercent) {
+  const isLong = trade.side === "LONG";
+  const oldSl = Number(trade.activeStopLossPrice || trade.stopLossPrice);
+  let newSl = oldSl;
+  let message = null;
+
+  const bestBefore = Number(trade.bestPrice || trade.entry);
+  trade.bestPrice = isLong ? Math.max(bestBefore, currentPrice) : Math.min(bestBefore, currentPrice);
+  trade.highestPnlPercent = Math.max(Number(trade.highestPnlPercent || 0), pnlPercent);
+
+  const setStopByProfit = (lockedProfitPercent, level, label) => {
+    const priceMove = lockedProfitPercent / Number(trade.leverage || 1) / 100;
+    const targetSl = isLong
+      ? trade.entry * (1 + priceMove)
+      : trade.entry * (1 - priceMove);
+
+    const better = isLong ? targetSl > newSl : targetSl < newSl;
+    if (better) {
+      newSl = Number(targetSl.toFixed(4));
+      trade.riskLevel = level;
+      message = label;
+    }
+  };
+
+  if (pnlPercent >= 0.6) setStopByProfit(0, "BREAK_EVEN", "SL giriş fiyatına çekildi. Risk sıfıra yaklaştı.");
+  if (pnlPercent >= 1.2) setStopByProfit(0.35, "LOCK_035", "SL kâra çekildi. Yaklaşık +%0.35 korunuyor.");
+  if (pnlPercent >= 2.0) setStopByProfit(0.8, "LOCK_080", "Kâr koruma güçlendi. Yaklaşık +%0.80 korunuyor.");
+  if (pnlPercent >= 3.0) setStopByProfit(1.4, "TRAILING", "Trailing koruma aktif. Kâr korunarak devam.");
+
+  if (newSl !== oldSl) {
+    trade.activeStopLossPrice = newSl;
+    trade.stopLossPrice = newSl;
+    trade.lastRiskMoveAt = new Date().toISOString();
+    trade.notes = Array.isArray(trade.notes) ? trade.notes : [];
+    trade.notes.push({ at: trade.lastRiskMoveAt, oldSl, newSl, pnlPercent, message });
+    saveTrackedTrade(trade);
+    return { changed: true, oldSl, newSl, message };
+  }
+
+  saveTrackedTrade(trade);
+  return { changed: false, oldSl, newSl, message: null };
+}
 
 function distanceToPricePercent(currentPrice, targetPrice) {
   return Number(((Math.abs(targetPrice - currentPrice) / currentPrice) * 100).toFixed(2));
@@ -76,34 +128,36 @@ async function sendUserTrackedReports(symbol, signal, currentPrice) {
   const trackedTrades = getActiveTrackedTradesBySymbol(symbol);
 
   for (const trade of trackedTrades) {
-    const riskResult = reduceTrackedTradeRisk(trade, currentPrice);
-    const pnlPercent = riskResult.pnlPercent ?? calculatePnlPercent(trade, currentPrice);
+    const pnlPercent = calculatePnlPercent(trade, currentPrice);
+    const riskMove = improveTrackedRisk(trade, currentPrice, pnlPercent);
 
-    for (const riskUpdate of riskResult.updates || []) {
+    if (riskMove.changed) {
       await sendTelegram(
         `
 🛡️ <b>Risk Azaltıldı</b>
 
 Parite: <b>${trade.symbol}</b>
 Yön: <b>${trade.side}</b>
-Anlık PnL: <b>%${riskUpdate.pnlPercent}</b>
-Eski SL: <b>${riskUpdate.oldStop}</b>
-Yeni SL: <b>${riskUpdate.newStop}</b>
+PnL: <b>%${pnlPercent}</b>
 
-${riskUpdate.message}
+Eski SL: <b>${riskMove.oldSl}</b>
+Yeni SL: <b>${riskMove.newSl}</b>
+
+${riskMove.message}
 `,
         trade.userId
       );
     }
 
     const isLong = trade.side === "LONG";
+    const activeStop = Number(trade.activeStopLossPrice || trade.stopLossPrice);
     const hitTp = isLong
       ? currentPrice >= trade.takeProfitPrice
       : currentPrice <= trade.takeProfitPrice;
 
     const hitSl = isLong
-      ? currentPrice <= trade.stopLossPrice
-      : currentPrice >= trade.stopLossPrice;
+      ? currentPrice <= activeStop
+      : currentPrice >= activeStop;
 
     if (hitTp || hitSl) {
       const status = hitTp ? "CLOSED_TP" : "CLOSED_SL";
@@ -129,7 +183,7 @@ PnL: <b>%${pnlPercent}</b>
 
     const now = Date.now();
     const lastAt = lastFollowReportAt[trade.id] || 0;
-    const intervalMs = Number(process.env.FOLLOW_REPORT_MINUTES || 5) * 60 * 1000;
+    const intervalMs = Number(process.env.FOLLOW_REPORT_MINUTES || 10) * 60 * 1000;
 
     if (now - lastAt < intervalMs) continue;
 
@@ -137,7 +191,7 @@ PnL: <b>%${pnlPercent}</b>
 
     const decision = getFollowDecision(trade, signal, pnlPercent);
     const tpDistance = distanceToPricePercent(currentPrice, trade.takeProfitPrice);
-    const slDistance = distanceToPricePercent(currentPrice, trade.stopLossPrice);
+    const slDistance = distanceToPricePercent(currentPrice, trade.activeStopLossPrice || trade.stopLossPrice);
 
     await sendTelegram(
       `
@@ -149,7 +203,7 @@ Yön: <b>${trade.side}</b>
 Giriş: <b>${trade.entry}</b>
 Şu An: <b>${currentPrice}</b>
 TP: <b>${trade.takeProfitPrice}</b> — Uzaklık: <b>%${tpDistance}</b>
-SL: <b>${trade.stopLossPrice}</b> — Uzaklık: <b>%${slDistance}</b>
+SL: <b>${trade.activeStopLossPrice || trade.stopLossPrice}</b> — Uzaklık: <b>%${slDistance}</b>
 
 Anlık PnL: <b>%${pnlPercent}</b>
 
@@ -170,24 +224,7 @@ async function scanSymbol(symbol) {
     const signal = analyzeMarket(candles);
     const currentPrice = signal.lastClose;
 
-    const paperResult = await updatePaperTrades(symbol, currentPrice);
-    const closedTrades = paperResult.closed || [];
-    const paperRiskUpdates = paperResult.riskUpdates || [];
-
-    for (const item of paperRiskUpdates) {
-      const { trade, update } = item;
-      await sendTelegram(`
-🛡️ <b>Paper Trade Risk Azaltıldı</b>
-
-Parite: <b>${trade.symbol}</b>
-Yön: <b>${trade.side}</b>
-Anlık PnL: <b>%${update.pnlPercent}</b>
-Eski SL: <b>${update.oldStop}</b>
-Yeni SL: <b>${update.newStop}</b>
-
-${update.message}
-`);
-    }
+    const closedTrades = await updatePaperTrades(symbol, currentPrice);
 
     for (const closed of closedTrades) {
       await sendTelegram(`
@@ -293,7 +330,7 @@ ${signal.reasons.map((r) => `✅ ${r}`).join("\n")}
   }
 }
 
-async function runScannerOnce() {
+async function runScanCycle() {
   if (!isBotActive()) {
     console.log("⏸️ Bot durduruldu. Tarama yapılmadı.");
     return;
@@ -308,9 +345,11 @@ async function runScannerOnce() {
 
 function startScanner() {
   console.log("📡 Scanner başlatıldı.");
-  runScannerOnce().catch((err) => console.error("İlk tarama hatası:", err.message));
-  cron.schedule("*/1 * * * *", () => {
-    runScannerOnce().catch((err) => console.error("Tarama döngüsü hatası:", err.message));
+
+  runScanCycle().catch((err) => console.error("İlk tarama hatası:", err.message));
+
+  cron.schedule("*/1 * * * *", async () => {
+    await runScanCycle();
   });
 }
 

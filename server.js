@@ -9,7 +9,7 @@ const { startScanner } = require("./scanner");
 const { getSpotAccount } = require("./binancePrivate");
 const { loadOpenTrades, getOpenTrades, getAllTrades, createPaperTrade } = require("./paperTrade");
 const { getRiskStats, registerTradeOpen } = require("./riskGuard");
-const { isBotActive, startBot, stopBot } = require("./botState");
+const { isBotActive, startBot, stopBot, getBotState } = require("./botState");
 const { getApproval, approveTrade, rejectTrade, getAllApprovals } = require("./approvalStore");
 const {
   createTrackedTradeFromApproval,
@@ -109,13 +109,13 @@ Not: Özel mesajların gelmesi için botu özelden /start yapmış olman gerekeb
 app.get("/start-bot", async (req, res) => {
   startBot();
   await sendTelegram("🟢 Bot başlatıldı. Piyasa taraması aktif.");
-  res.json({ ok: true, botActive: isBotActive() });
+  res.json({ ok: true, botActive: isBotActive(), state: getBotState() });
 });
 
 app.get("/stop-bot", async (req, res) => {
   stopBot();
   await sendTelegram("🔴 Bot durduruldu. Piyasa taraması pasif.");
-  res.json({ ok: true, botActive: isBotActive() });
+  res.json({ ok: true, botActive: isBotActive(), state: getBotState() });
 });
 
 app.get("/test-telegram", async (req, res) => {
@@ -197,11 +197,12 @@ app.get("/status", (req, res) => {
     ok: true,
     bot: "RUNNING",
     botActive: isBotActive(),
+    botState: getBotState(),
     tradingEnabled: process.env.TRADING_ENABLED === "true",
     tradeMode: process.env.TRADE_MODE || "SPOT",
     autoMode: process.env.AUTO_MODE === "true",
     autoMinScore: Number(process.env.AUTO_MIN_SCORE || 95),
-    followReportMinutes: Number(process.env.FOLLOW_REPORT_MINUTES || 5),
+    followReportMinutes: Number(process.env.FOLLOW_REPORT_MINUTES || 10),
     openai: getOpenAIStats(),
     risk: getRiskStats(),
     approvals: getAllApprovals(),
@@ -274,24 +275,15 @@ const PORT = process.env.PORT || 3000;
 async function startApp() {
   app.listen(PORT, () => {
     console.log(`✅ Bot backend çalışıyor: http://localhost:${PORT}`);
-    console.log(`🟢 Bot durumu: ${isBotActive() ? "AKTİF" : "DURDURULDU"}`);
   });
 
   try {
     await loadOpenTrades();
   } catch (err) {
-    console.error("Açık işlem yüklenemedi, RAM ile devam:", err.message);
+    console.error("Açık işlem yükleme hatası, bot yine de çalışacak:", err.message);
   }
 
   startScanner();
 }
-
-process.on("unhandledRejection", (err) => {
-  console.error("Yakalanmamış promise hatası:", err?.message || err);
-});
-
-process.on("uncaughtException", (err) => {
-  console.error("Yakalanmamış uygulama hatası:", err?.message || err);
-});
 
 startApp();

@@ -1,4 +1,10 @@
-const approvals = {};
+const { readJson, writeJson } = require("./dataStore");
+
+let approvals = readJson("approvals.json", {});
+
+function persist() {
+  writeJson("approvals.json", approvals);
+}
 
 function createApproval(symbol, signal, tradePlan) {
   const approval = {
@@ -18,6 +24,7 @@ function createApproval(symbol, signal, tradePlan) {
   };
 
   approvals[symbol] = approval;
+  persist();
   return approval;
 }
 
@@ -30,6 +37,7 @@ function approveTrade(symbol) {
   if (!approval) return null;
   approval.status = "APPROVED";
   approval.approvedAt = new Date().toISOString();
+  persist();
   return approval;
 }
 
@@ -38,10 +46,24 @@ function rejectTrade(symbol) {
   if (!approval) return null;
   approval.status = "REJECTED";
   approval.rejectedAt = new Date().toISOString();
+  persist();
   return approval;
 }
 
+function expireOldApprovals() {
+  const now = Date.now();
+  let changed = false;
+  for (const approval of Object.values(approvals)) {
+    if (approval.status === "PENDING" && new Date(approval.expiresAt).getTime() < now) {
+      approval.status = "EXPIRED";
+      changed = true;
+    }
+  }
+  if (changed) persist();
+}
+
 function getAllApprovals() {
+  expireOldApprovals();
   return Object.values(approvals);
 }
 
