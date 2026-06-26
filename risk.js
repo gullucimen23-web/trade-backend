@@ -3,64 +3,70 @@ function roundPrice(value) {
 }
 
 function buildTradePlan(symbol, signal, override = {}) {
-  const entry = Number(override.entry || signal.lastClose);
-  const side = override.side || signal.side || "LONG";
-  const leverage = Number(override.leverage || process.env.DEFAULT_LEVERAGE || 10);
-
-  let positionSizePercent = leverage >= 15 ? 8 : 10;
-  let tp1Percent = leverage >= 15 ? 1.0 : 1.2;
-  let tp2Percent = leverage >= 15 ? 1.8 : 2.2;
-  let tp3Percent = leverage >= 15 ? 2.6 : 3.2;
-  let stopLossPercent = leverage >= 15 ? 0.6 : 0.8;
-  let confidenceLevel = "NORMAL";
-
-  if (signal.score >= 95) {
-    positionSizePercent = leverage >= 15 ? 10 : 15;
-    tp1Percent = leverage >= 15 ? 1.2 : 1.5;
-    tp2Percent = leverage >= 15 ? 2.2 : 2.8;
-    tp3Percent = leverage >= 15 ? 3.2 : 4.0;
-    stopLossPercent = leverage >= 15 ? 0.65 : 0.85;
-    confidenceLevel = "ULTRA";
-  } else if (signal.score >= 90) {
-    positionSizePercent = leverage >= 15 ? 9 : 12;
-    tp1Percent = leverage >= 15 ? 1.1 : 1.4;
-    tp2Percent = leverage >= 15 ? 2.0 : 2.5;
-    tp3Percent = leverage >= 15 ? 3.0 : 3.6;
-    stopLossPercent = leverage >= 15 ? 0.6 : 0.8;
-    confidenceLevel = "PRO";
-  } else if (signal.score >= 80) {
-    confidenceLevel = "STRONG";
+  // Yeni ana sistem: swing emir planı. Signal içinde plan varsa aynen onu kullanır.
+  if (signal && signal.plan) {
+    return {
+      symbol,
+      side: signal.side,
+      mode: "SWING_PLAN",
+      confidenceLevel: signal.score >= 95 ? "ULTRA" : signal.score >= 90 ? "PRO" : "WATCH",
+      entry: roundPrice(signal.plan.entry),
+      entryLow: roundPrice(signal.plan.entryLow),
+      entryHigh: roundPrice(signal.plan.entryHigh),
+      stopLossPrice: roundPrice(signal.plan.stopLossPrice),
+      stopLossPercent: signal.plan.stopLossPercent,
+      tp1Price: roundPrice(signal.plan.tp1Price),
+      tp2Price: roundPrice(signal.plan.tp2Price),
+      tp3Price: roundPrice(signal.plan.tp3Price),
+      tp1Percent: signal.plan.tp1Percent,
+      tp2Percent: signal.plan.tp2Percent,
+      tp3Percent: signal.plan.tp3Percent,
+      tp1ClosePercent: signal.plan.tp1ClosePercent,
+      tp2ClosePercent: signal.plan.tp2ClosePercent,
+      tp3ClosePercent: signal.plan.tp3ClosePercent,
+      riskReward: signal.plan.riskReward,
+      targetProfitUsdt: signal.plan.targetProfitUsdt,
+      estimatedMarginUsdt: signal.plan.estimatedMarginUsdt,
+      estimatedRiskUsdt: signal.plan.estimatedRiskUsdt,
+      requiredNotionalUsdt: signal.plan.requiredNotionalUsdt,
+      positionSizePercent: 10,
+      leverage: signal.plan.leverage,
+      timeWindow: signal.plan.timeWindow,
+      tradingEnabled: false,
+      manualOnly: true,
+    };
   }
 
+  // Eski sistem geriye uyumluluk için duruyor ama otomatik trade kapalı tutulur.
+  const entry = Number(override.entry || signal.lastClose);
+  const side = override.side || signal.side || "LONG";
+  const leverage = Number(override.leverage || process.env.DEFAULT_LEVERAGE || 5);
+  const tp1Percent = 1.2;
+  const tp2Percent = 2.2;
+  const tp3Percent = 3.2;
+  const stopLossPercent = 0.8;
   const isLong = side === "LONG";
-  const priceByPercent = (percent) => {
-    return roundPrice(isLong ? entry * (1 + percent / 100) : entry * (1 - percent / 100));
-  };
-
-  const stopLossPrice = roundPrice(isLong
-    ? entry * (1 - stopLossPercent / 100)
-    : entry * (1 + stopLossPercent / 100));
-
+  const priceByPercent = (percent) => roundPrice(isLong ? entry * (1 + percent / 100) : entry * (1 - percent / 100));
+  const stopLossPrice = roundPrice(isLong ? entry * (1 - stopLossPercent / 100) : entry * (1 + stopLossPercent / 100));
   return {
     symbol,
     side,
-    confidenceLevel,
+    confidenceLevel: "LEGACY",
     entry: roundPrice(entry),
     entryLow: roundPrice(entry * 0.999),
     entryHigh: roundPrice(entry * 1.001),
-    takeProfitPercent: tp1Percent,
-    tp1Percent,
-    tp2Percent,
-    tp3Percent,
-    stopLossPercent,
-    takeProfitPrice: priceByPercent(tp1Percent),
     tp1Price: priceByPercent(tp1Percent),
     tp2Price: priceByPercent(tp2Percent),
     tp3Price: priceByPercent(tp3Percent),
     stopLossPrice,
-    positionSizePercent,
+    tp1Percent,
+    tp2Percent,
+    tp3Percent,
+    stopLossPercent,
+    positionSizePercent: 10,
     leverage,
-    tradingEnabled: process.env.TRADING_ENABLED === "true",
+    tradingEnabled: false,
+    manualOnly: true,
   };
 }
 

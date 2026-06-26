@@ -291,4 +291,161 @@ function analyzeMultiTimeframe({ candles5m, candles15m, candles1h }) {
   return applyMultiTimeframeFilter(primary, mid, high);
 }
 
-module.exports = { analyzeMarket, analyzeMultiTimeframe };
+function planPrice(side, entry, percent) {
+  return round(side === "LONG" ? entry * (1 + percent / 100) : entry * (1 - percent / 100), 4);
+}
+
+function analyzeSwingPlan({ candles15m, candles1h, candles4h }) {
+  const entrySignal = analyzeMarket(candles15m, { timeframe: "15m" });
+  const trend1h = analyzeMarket(candles1h, { timeframe: "1h" });
+  const trend4h = analyzeMarket(candles4h, { timeframe: "4h" });
+
+  let side = entrySignal.side;
+  const filters = [...(entrySignal.filters || [])];
+  if (!side || side === "NONE") filters.push("15m net yön üretmedi");
+
+  const same1h = sameDirectionScore(trend1h, side);
+  const opp1h = oppositeDirectionScore(trend1h, side);
+  const same4h = sameDirectionScore(trend4h, side);
+  const opp4h = oppositeDirectionScore(trend4h, side);
+
+  const minScore = Number(process.env.SWING_MIN_SCORE || 90);
+  const minConfidence = Number(process.env.SWING_MIN_CONFIDENCE || 75);
+  const minVolume = Number(process.env.SWING_MIN_VOLUME_RATIO || 0.90);
+  const minRR = Number(process.env.SWING_MIN_RR || 2);
+  const requireEntryTrigger = process.env.REQUIRE_ENTRY_TRIGGER !== "false";
+  const targetProfitUsdt = Number(process.env.TARGET_PROFIT_USDT || 5);
+  const defaultBalance = Number(process.env.ACCOUNT_BALANCE_USDT || 100);
+  const leverage = Number(process.env.SWING_LEVERAGE || process.env.DEFAULT_LEVERAGE || 5);
+
+  const mtfOk = side !== "NONE" && same1h >= 58 && same1h >= opp1h && same4h >= 52 && opp4h <= same4h + 8;
+  if (!mtfOk) filters.push(`1h/4h yön onayı yetersiz: 1h ${same1h}/${opp1h}, 4h ${same4h}/${opp4h}`);
+
+  const volumeOk = Number(entrySignal.volumeRatio || 0) >= minVolume;
+  if (!volumeOk) filters.push(`Hacim x${entrySignal.volumeRatio} < x${minVolume} — işlem yok`);
+
+  const adxOk = Number(entrySignal.adx || 0) >= Number(process.env.SWING_MIN_ADX || 20) || Number(trend1h.adx || 0) >= Number(process.env.SWING_MIN_ADX || 20);
+  if (!adxOk) filters.push("Trend gücü zayıf — işlem yok");
+
+  const triggerPrice = side === "LONG" ? Number(entrySignal.resistance || entrySignal.lastClose) : Number(entrySignal.support || entrySignal.lastClose);
+  const triggerConfirmed = side === "LONG" ? Boolean(entrySignal.breakoutConfirmed) : Boolean(entrySignal.breakdownConfirmed);
+  const triggerOk = !requireEntryTrigger || triggerConfirmed;
+  const triggerCondition = side === "LONG"
+    ? `15m mum ${round(triggerPrice, 4)} üstünde kapanmalı + hacim x${minVolume}+ olmalı`
+    : `15m mum ${round(triggerPrice, 4)} altında kapanmalı + hacim x${minVolume}+ olmalı`;
+  if (!triggerOk && side !== "NONE") filters.push(`Giriş tetikleyicisi bekleniyor: ${triggerCondition}`);
+
+  const entry = Number(entrySignal.lastClose);
+  const atrPct = Math.max(Number(entrySignal.atrPercent || 0.35), 0.35);
+  const stopPct = clamp(atrPct * Number(process.env.SWING_STOP_ATR_MULT || 1.25), 0.45, 1.35);
+  const tp1Pct = stopPct * 1.15;
+  const tp2Pct = stopPct * 2.05;
+  const tp3Pct = stopPct * 3.0;
+  const weightedTpPct = (tp1Pct * 0.30) + (tp2Pct * 0.40) + (tp3Pct * 0.30);
+  const riskReward = weightedTpPct / stopPct;
+  if (riskReward < minRR) filters.push(`Risk/ödül 1:${round(riskReward, 2)} < 1:${minRR} — işlem yok`);
+
+  let score = Math.round(
+    (Number(entrySignal.score || 0) * 0.45) +
+    (same1h * 0.30) +
+    (same4h * 0.25)
+  );
+  if (!mtfOk) score = Math.min(score, 72);
+  if (!volumeOk) score = Math.min(score, 68);
+  if (!adxOk) score = Math.min(score, 70);
+  score = clamp(score, 0, 100);
+
+  let confidence = calculateConfidence({
+    score,
+    entryApproved: true,
+    volumeRatio: entrySignal.volumeRatio,
+    marketRegime: entrySignal.marketRegime,
+    mtfOk,
+    breakoutConfirmed: entrySignal.breakoutConfirmed,
+    breakdownConfirmed: entrySignal.breakdownConfirmed,
+    side,
+  });
+  if (!mtfOk) confidence = Math.min(confidence, 65);
+  if (!volumeOk) confidence = Math.min(confidence, 60);
+
+  if (!triggerOk) confidence = Math.min(confidence, 72);
+
+  const planOk = side !== "NONE" && score >= minScore && confidence >= minConfidence && volumeOk && mtfOk && riskReward >= minRR && triggerOk;
+  if (score < minScore) filters.push(`Skor ${score} < ${minScore} — işlem yok`);
+  if (confidence < minConfidence) filters.push(`Güven ${confidence}% < ${minConfidence}% — işlem yok`);
+
+  const entryLow = round(side === "LONG" ? entry * 0.999 : entry * 0.9995, 4);
+  const entryHigh = round(side === "LONG" ? entry * 1.0005 : entry * 1.001, 4);
+  const stopLossPrice = planPrice(side === "LONG" ? "SHORT" : "LONG", entry, stopPct);
+  const tp1Price = planPrice(side, entry, tp1Pct);
+  const tp2Price = planPrice(side, entry, tp2Pct);
+  const tp3Price = planPrice(side, entry, tp3Pct);
+
+  const requiredNotional = targetProfitUsdt / (weightedTpPct / 100);
+  const estimatedMargin = requiredNotional / leverage;
+  const estimatedRiskUsdt = requiredNotional * (stopPct / 100);
+
+  return {
+    ...entrySignal,
+    mode: "SWING_PLAN",
+    action: planOk ? `PLAN_${side}` : (side && side !== "NONE" ? `WATCH_${side}` : "WAIT"),
+    side: planOk ? side : (side || "NONE"),
+    score,
+    confidence,
+    entryApproved: planOk,
+    entryBlocked: !planOk,
+    filters,
+    reasons: [
+      `15m giriş yönü: ${side}`,
+      `1h teyit: aynı ${same1h} / ters ${opp1h}`,
+      `4h teyit: aynı ${same4h} / ters ${opp4h}`,
+      ...(entrySignal.reasons || []).slice(0, 4),
+    ],
+    mtfSummary: { same1h, opp1h, same4h, opp4h, mtfOk },
+    entryTrigger: {
+      requireEntryTrigger,
+      triggerPrice: round(triggerPrice, 4),
+      triggerConfirmed,
+      condition: triggerCondition,
+      candle: "15m",
+      minVolumeRatio: minVolume,
+      waitMessage: triggerOk ? "GİRİŞ ONAYLANDI" : "ŞU AN GİRME — TETİK BEKLE",
+    },
+    plan: {
+      targetProfitUsdt: round(targetProfitUsdt, 2),
+      accountBalanceUsdt: round(defaultBalance, 2),
+      leverage,
+      entry: round(entry, 4),
+      entryLow,
+      entryHigh,
+      stopLossPrice,
+      stopLossPercent: round(stopPct, 2),
+      tp1Price,
+      tp2Price,
+      tp3Price,
+      tp1Percent: round(tp1Pct, 2),
+      tp2Percent: round(tp2Pct, 2),
+      tp3Percent: round(tp3Pct, 2),
+      tp1ClosePercent: 30,
+      tp2ClosePercent: 40,
+      tp3ClosePercent: 30,
+      riskReward: round(riskReward, 2),
+      estimatedMarginUsdt: round(estimatedMargin, 2),
+      estimatedRiskUsdt: round(estimatedRiskUsdt, 2),
+      requiredNotionalUsdt: round(requiredNotional, 2),
+      timeWindow: process.env.SWING_TIME_WINDOW || "2 saat - 2 gün",
+    },
+    guide: {
+      decision: planOk ? "GİRİŞ ONAYLANDI — EMİR PLANI UYGULA" : "HAZIRLIK — GİRİŞ TETİĞİ BEKLENİYOR",
+      next: planOk
+        ? [
+          `${side} için ${entryLow} - ${entryHigh} giriş bölgesi`,
+          `Stop: ${stopLossPrice}`,
+          `TP1 ${tp1Price}, TP2 ${tp2Price}, TP3 ${tp3Price}`,
+        ]
+        : filters.slice(0, 4),
+    },
+  };
+}
+
+module.exports = { analyzeMarket, analyzeMultiTimeframe, analyzeSwingPlan };

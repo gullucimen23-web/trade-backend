@@ -1,5 +1,5 @@
 const { getKlines } = require("./binance");
-const { analyzeMarket, analyzeMultiTimeframe } = require("./strategy");
+const { analyzeMarket, analyzeMultiTimeframe, analyzeSwingPlan } = require("./strategy");
 const { askOpenAIWithGuard } = require("./openaiGuard");
 const { sendTelegram, sendTelegramWithButtons } = require("./telegram");
 const { buildTradePlan } = require("./risk");
@@ -94,71 +94,87 @@ function shouldSendWatchAlert(symbol, signal) {
 
 function buildWatchMessage(symbol, signal) {
   const side = signal.side && signal.side !== "NONE" ? signal.side : "BEKLE";
-  const trigger = side === "LONG" ? signal.resistance : signal.support;
-  const triggerText = side === "LONG"
-    ? `LONG için <b>${trigger}</b> üstü hacimli 5m kapanış bekleniyor.`
-    : side === "SHORT"
-      ? `SHORT için <b>${trigger}</b> altı hacimli 5m kapanış bekleniyor.`
-      : `Net yön yok; kırılım bekleniyor.`;
+  const t = signal.entryTrigger || {};
+  const triggerLine = t.condition || (side === "LONG"
+    ? `15m mum ${signal.resistance} üstünde hacimli kapanmalı`
+    : `15m mum ${signal.support} altında hacimli kapanmalı`);
+  const triggerPrice = t.triggerPrice || (side === "LONG" ? signal.resistance : signal.support);
+  const distance = triggerPrice && signal.lastClose
+    ? Math.abs(((Number(triggerPrice) - Number(signal.lastClose)) / Number(signal.lastClose)) * 100).toFixed(2)
+    : "-";
 
   return `
-👀 <b>${symbol} HAZIRLIK / İZLEME</b>
+🟡 <b>FALIX HAZIRLIK / GİRİŞ BEKLENİYOR</b>
 
+Parite: <b>${symbol}</b>
 Yön Adayı: <b>${side}</b>
 Skor: <b>${signal.score}/100</b>
 Güven: <b>${signal.confidence || signal.score}%</b>
-Piyasa: <b>${signal.marketRegime?.label || "-"}</b>
 Fiyat: <b>${signal.lastClose}</b>
 Hacim: <b>x${signal.volumeRatio}</b>
 
-Karar: <b>ŞİMDİ GİRME — ONAY BEKLE</b>
-${triggerText}
+⏳ <b>ŞU AN GİRME</b>
+Bot sadece hazırlık gördü. Giriş için tetik bekleniyor.
 
-📌 <b>Neyi bekliyoruz?</b>
-${signal.guide?.next?.map((r) => `• ${r}`).join("\n") || "• Hacimli kırılım / net yön teyidi"}
+🔔 <b>Giriş Onayı İçin Şart</b>
+${triggerLine}
 
-${signal.filters?.length ? `⛔ <b>Engeller:</b>\n${signal.filters.slice(0, 4).map((r) => `• ${r}`).join("\n")}` : ""}
+📍 <b>Tetik Fiyatı</b>
+${triggerPrice || "-"}
 
-Sebep:
-${signal.reasons.slice(0, 5).map((r) => `✅ ${r}`).join("\n")}
+📏 <b>Girişe Kalan Mesafe</b>
+%${distance}
 
-Bot onay gelirse ayrıca <b>giriş onayı</b> gönderecek.`;
+⛔ <b>Eksik / Engel</b>
+${signal.filters?.slice(0, 5).map((r) => `• ${r}`).join("\n") || "• Net onay bekleniyor"}
+
+📌 Şart oluşursa bot ayrı mesajla <b>🔔 GİRİŞ ONAYLANDI</b> gönderecek.
+`;
 }
 
 function buildSignalMessage(symbol, signal, tradePlan) {
+  const t = signal.entryTrigger || {};
   return `
-🚀 <b>FALIX SİNYAL ADAYI</b>
+🔔 <b>GİRİŞ ONAYLANDI — FALIX SWING EMİR PLANI</b>
 
 Parite: <b>${symbol}</b>
-Yön: <b>${signal.side}</b>
+İşlem: <b>${signal.side}</b>
 Skor: <b>${signal.score}/100</b>
-Seviye: <b>${getSignalLevel(signal.score)}</b>
-Güven: <b>${signal.confidence || signal.score}%</b>
-Piyasa: <b>${signal.marketRegime?.label || "-"}</b>
-Fiyat: <b>${signal.lastClose}</b>
+Güven: <b>${signal.confidence}%</b>
+Süre: <b>${tradePlan.timeWindow}</b>
 
-📌 <b>Not:</b> Bot SL/TP dayatmaz. İşlemi açarsan canlı takip eder; yön bozulunca “çık / kârı koru / ters yöne hazırlan” diye uyarır.
+✅ <b>Giriş Şartı Oluştu</b>
+${t.condition || "15m giriş onayı tamamlandı"}
 
-Long Güç: <b>${signal.longScore}</b>
-Short Güç: <b>${signal.shortScore}</b>
-RSI: ${signal.rsi}
-EMA9/21: ${signal.ema9} / ${signal.ema21}
-MACD: ${signal.macdSide}
-ADX: ${signal.adx}
-Hacim: x${signal.volumeRatio}
-Karar: <b>${signal.guide?.decision || (signal.entryApproved ? "GİRİŞ ONAYI" : "BEKLE")}</b>
-Giriş Onayı: <b>${signal.entryApproved ? "VAR" : "YOK / BEKLE"}</b>
+📥 <b>Giriş Bölgesi</b>
+${tradePlan.entryLow} - ${tradePlan.entryHigh}
 
-🎯 <b>Beklenen şartlar:</b>
-${signal.guide?.next?.map((r) => `• ${r}`).join("\n") || "Bekle"}
-${signal.filters?.length ? `
-Filtre:
-${signal.filters.slice(0, 4).map((r) => `⛔ ${r}`).join("\n")}` : ""}
+🛑 <b>Stop</b>
+${tradePlan.stopLossPrice}  (%${tradePlan.stopLossPercent})
+
+🎯 <b>Kâr Alma Planı</b>
+TP1: <b>${tradePlan.tp1Price}</b> → %${tradePlan.tp1ClosePercent} kapat
+TP2: <b>${tradePlan.tp2Price}</b> → %${tradePlan.tp2ClosePercent} kapat
+TP3: <b>${tradePlan.tp3Price}</b> → kalan %${tradePlan.tp3ClosePercent} kapat
+
+💰 <b>Hedef Kâr</b>
+Yaklaşık: <b>${tradePlan.targetProfitUsdt} USDT</b>
+Gerekli tahmini marjin: <b>${tradePlan.estimatedMarginUsdt} USDT</b>
+Kaldıraç: <b>${tradePlan.leverage}x</b>
+Tahmini risk: <b>${tradePlan.estimatedRiskUsdt} USDT</b>
+Risk/Ödül: <b>1:${tradePlan.riskReward}</b>
+
+📌 <b>Uygulama Kuralı</b>
+• Giriş bölgesinden işlem açılır.
+• Stop kesin uygulanır.
+• TP1 gelirse %30 kapat ve stop'u girişe çek.
+• TP2 gelirse %40 kapat.
+• TP3 gelirse kalan pozisyon kapatılır.
 
 Sebep:
 ${signal.reasons.slice(0, 6).map((r) => `✅ ${r}`).join("\n")}
 
-İşlem açtıysan butona bas, canlı takip başlayacak.
+⚠️ Bu otomatik al-sat değildir. Kullanıcı planı uygular, bot takip eder.
 `;
 }
 
@@ -193,13 +209,13 @@ Açık pozisyon varsa bot her ${process.env.FOLLOW_REPORT_SECONDS || 60} saniyed
 }
 
 async function scanSymbol(symbol) {
-  const [candles5m, candles15m, candles1h] = await Promise.all([
-    getKlines(symbol, process.env.SCAN_INTERVAL || "5m", 220),
+  const [candles15m, candles1h, candles4h] = await Promise.all([
     getKlines(symbol, "15m", 220),
     getKlines(symbol, "1h", 220),
+    getKlines(symbol, "4h", 220),
   ]);
 
-  const signal = analyzeMultiTimeframe({ candles5m, candles15m, candles1h });
+  const signal = analyzeSwingPlan({ candles15m, candles1h, candles4h });
   const currentPrice = signal.lastClose;
   latestSignals[symbol] = signal;
 
@@ -210,7 +226,7 @@ async function scanSymbol(symbol) {
 
   await sendUserTrackedReports(symbol, signal, currentPrice);
 
-  const signalThreshold = Number(process.env.SIGNAL_THRESHOLD || 85);
+  const signalThreshold = Number(process.env.SWING_MIN_SCORE || 90);
   if (
     signal.score < signalThreshold ||
     !signal.side ||
@@ -240,9 +256,11 @@ async function scanSymbol(symbol) {
   const tradePlan = buildTradePlan(symbol, signal);
   const approval = createApproval(symbol, signal, tradePlan);
 
-  askOpenAIWithGuard({ symbol, signal, tradePlan }).catch((err) => {
-    console.error("OpenAI arka plan hatası:", err.message);
-  });
+  if (process.env.OPENAI_SIGNAL_REVIEW === "true") {
+    askOpenAIWithGuard({ symbol, signal, tradePlan }).catch((err) => {
+      console.error("OpenAI arka plan hatası:", err.message);
+    });
+  }
 
   await sendTelegramWithButtons(buildSignalMessage(symbol, signal, tradePlan), [
     [{ text: "✅ Açtım / Canlı Takibe Al", callback_data: `TRACK:${symbol}:${approval.id}` }],

@@ -42,6 +42,120 @@ function updateBestRun(trade, currentPrice, pnlPercent) {
   return { pullbackFromBest };
 }
 
+
+function priceReached(side, currentPrice, targetPrice) {
+  if (!targetPrice) return false;
+  return side === "LONG" ? Number(currentPrice) >= Number(targetPrice) : Number(currentPrice) <= Number(targetPrice);
+}
+
+function stopReached(side, currentPrice, stopPrice) {
+  if (!stopPrice) return false;
+  return side === "LONG" ? Number(currentPrice) <= Number(stopPrice) : Number(currentPrice) >= Number(stopPrice);
+}
+
+function getPlanAdvice(trade, signal, currentPrice, pnlPercent) {
+  const plan = trade.plan || {};
+  if (!plan.stopLossPrice || !plan.tp1Price) return null;
+  const { sameSideScore, oppositeScore } = getScoresForTrade(trade, signal);
+  const { pullbackFromBest } = updateBestRun(trade, currentPrice, pnlPercent);
+  const side = trade.side;
+
+  if (stopReached(side, currentPrice, trade.stopMovedToEntry ? trade.entry : plan.stopLossPrice)) {
+    return {
+      status: "PLAN_STOP",
+      urgency: "CRITICAL",
+      icon: "❌",
+      title: trade.stopMovedToEntry ? "GİRİŞ STOPU ÇALIŞTI" : "STOP ÇALIŞTI",
+      reason: trade.stopMovedToEntry
+        ? "TP1 sonrası risk sıfırlanmıştı. Fiyat girişe döndü, plan kapatılır."
+        : "Plan stop seviyesine geldi. Zarar büyütülmez, işlem kapatılır.",
+      sameSideScore,
+      oppositeScore,
+      pullbackFromBest,
+      reverseReady: false,
+    };
+  }
+
+  if (!trade.tp1Done && priceReached(side, currentPrice, plan.tp1Price)) {
+    trade.tp1Done = true;
+    trade.stopMovedToEntry = true;
+    return {
+      status: "TP1_HIT",
+      urgency: "CRITICAL",
+      icon: "🎯",
+      title: "TP1 GERÇEKLEŞTİ",
+      reason: "Pozisyonun %30'unu kapat. Stop'u giriş fiyatına çek. Bu aşamadan sonra ana risk sıfırlanır.",
+      sameSideScore,
+      oppositeScore,
+      pullbackFromBest,
+      reverseReady: false,
+    };
+  }
+
+  if (trade.tp1Done && !trade.tp2Done && priceReached(side, currentPrice, plan.tp2Price)) {
+    trade.tp2Done = true;
+    return {
+      status: "TP2_HIT",
+      urgency: "CRITICAL",
+      icon: "🎯",
+      title: "TP2 GERÇEKLEŞTİ",
+      reason: "Pozisyonun %40'ını kapat. Kalan kısmı TP3 veya trailing stop için taşı.",
+      sameSideScore,
+      oppositeScore,
+      pullbackFromBest,
+      reverseReady: false,
+    };
+  }
+
+  if (trade.tp2Done && !trade.tp3Done && priceReached(side, currentPrice, plan.tp3Price)) {
+    trade.tp3Done = true;
+    return {
+      status: "TP3_HIT",
+      urgency: "CRITICAL",
+      icon: "🏁",
+      title: "TP3 GERÇEKLEŞTİ",
+      reason: "Plan tamamlandı. Kalan pozisyon kapatılır.",
+      sameSideScore,
+      oppositeScore,
+      pullbackFromBest,
+      reverseReady: false,
+    };
+  }
+
+  const nextTarget = !trade.tp1Done ? plan.tp1Price : !trade.tp2Done ? plan.tp2Price : plan.tp3Price;
+  const nextLabel = !trade.tp1Done ? "TP1" : !trade.tp2Done ? "TP2" : "TP3";
+  const oppositeTooStrong = oppositeScore >= Number(process.env.PLAN_INVALID_OPPOSITE_SCORE || 88) && oppositeScore > sameSideScore + 12;
+
+  if (oppositeTooStrong) {
+    return {
+      status: "PLAN_INVALID",
+      urgency: "HIGH",
+      icon: "⚠️",
+      title: "PLAN ZAYIFLADI",
+      reason: "Ters yön güçlendi. Pozisyon açıksa risk azalt; yeni ekleme yapma.",
+      sameSideScore,
+      oppositeScore,
+      pullbackFromBest,
+      reverseReady: true,
+      nextSide: side === "LONG" ? "SHORT" : "LONG",
+    };
+  }
+
+  return {
+    status: "PLAN_CONTINUE",
+    urgency: "NORMAL",
+    icon: "📊",
+    title: "PLAN DEVAM EDİYOR",
+    reason: `${nextLabel} hedefi bekleniyor. Stop: ${trade.stopMovedToEntry ? trade.entry : plan.stopLossPrice}.`,
+    sameSideScore,
+    oppositeScore,
+    pullbackFromBest,
+    reverseReady: false,
+    nextTarget,
+    nextLabel,
+  };
+}
+
 function getTrendFlags(trade, signal) {
   const isLong = trade.side === "LONG";
   const emaBull = Number(signal.ema9 || 0) > Number(signal.ema21 || 0);
@@ -61,6 +175,9 @@ function getTrendFlags(trade, signal) {
 }
 
 function getPositionAdvice(trade, signal, currentPrice, pnlPercent) {
+  const planAdvice = getPlanAdvice(trade, signal, currentPrice, pnlPercent);
+  if (planAdvice) return planAdvice;
+
   const { sameSideScore, oppositeScore } = getScoresForTrade(trade, signal);
   const { pullbackFromBest } = updateBestRun(trade, currentPrice, pnlPercent);
   const flags = getTrendFlags(trade, signal);
@@ -213,6 +330,8 @@ function formatTradeReport(trade, signal, currentPrice, advice, pnlPercent) {
   const reverseText = advice.reverseReady
     ? `\n🔁 <b>Ters yön:</b> ${advice.nextSide || (trade.side === "LONG" ? "SHORT" : "LONG")} güçleniyor. Çıkmadan ters işleme atlama; yeni onayı bekle.`
     : "";
+  const plan = trade.plan || {};
+  const planText = plan.tp1Price ? `\nPlan: TP1 <b>${plan.tp1Price}</b> | TP2 <b>${plan.tp2Price}</b> | TP3 <b>${plan.tp3Price}</b> | Stop <b>${trade.stopMovedToEntry ? trade.entry : plan.stopLossPrice}</b>\nDurum: TP1 ${trade.tp1Done ? "✅" : "⏳"} | TP2 ${trade.tp2Done ? "✅" : "⏳"} | TP3 ${trade.tp3Done ? "✅" : "⏳"}` : "";
 
   return `
 📊 <b>${trade.symbol} ${trade.side} CANLI POZİSYON</b>${amountText}
@@ -228,7 +347,7 @@ Geri verme: <b>%${Number(advice.pullbackFromBest || 0).toFixed(2)}</b>
 Pozisyon Gücü: <b>${advice.sameSideScore}/100</b>
 Ters Güç: <b>${advice.oppositeScore}/100</b>
 RSI: <b>${signal.rsi}</b> | ADX: <b>${signal.adx}</b>
-EMA: <b>${signal.ema9}</b> / <b>${signal.ema21}</b>
+EMA: <b>${signal.ema9}</b> / <b>${signal.ema21}</b>${planText}
 
 ${advice.icon} <b>${advice.title}</b>
 ${advice.reason}${reverseText}
