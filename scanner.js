@@ -242,9 +242,27 @@ async function scanSymbol(symbol) {
   const currentPrice = signal.lastClose;
   latestSignals[symbol] = signal;
 
-  const closedTrades = await updatePaperTrades(symbol, currentPrice);
+  const paperUpdate = await updatePaperTrades(symbol, currentPrice);
+  const closedTrades = Array.isArray(paperUpdate)
+    ? paperUpdate
+    : Array.isArray(paperUpdate?.closed)
+      ? paperUpdate.closed
+      : [];
+  const paperEvents = Array.isArray(paperUpdate?.events) ? paperUpdate.events : [];
+
+  for (const event of paperEvents) {
+    if (event.type === "TP1") {
+      await sendTelegram(`🎯 <b>TP1 GELDİ</b>\n${event.trade.symbol} ${event.trade.side}\nPnL: <b>%${event.pnlPercent}</b>\nKârın bir kısmı alındı, stop girişe çekildi.`);
+    } else if (event.type === "TP2") {
+      await sendTelegram(`🎯 <b>TP2 GELDİ</b>\n${event.trade.symbol} ${event.trade.side}\nPnL: <b>%${event.pnlPercent}</b>\nKalan pozisyon TP3 / stop ile takip ediliyor.`);
+    } else if (event.type === "RISK_MOVED") {
+      await sendTelegram(`📊 <b>POZİSYONU KORU</b>\n${event.trade.symbol} ${event.trade.side}\n${event.message}\nYeni Stop: <b>${event.trade.activeStopLossPrice}</b>`);
+    }
+  }
+
   for (const closed of closedTrades) {
-    await sendTelegram(`✅ <b>Paper Trade Kapandı</b>\n${closed.symbol} ${closed.side}\nPnL: <b>%${closed.pnlPercent}</b>`);
+    const action = closed.status === "CLOSED_TP" ? "✅ TP ile kapandı" : "🛑 Stop ile kapandı";
+    await sendTelegram(`${action}\n<b>${closed.symbol} ${closed.side}</b>\nPnL: <b>%${closed.pnlPercent}</b>`);
   }
 
   await sendUserTrackedReports(symbol, signal, currentPrice);

@@ -1,14 +1,18 @@
 const { readJson, writeJson } = require("./dataStore");
 const { registerTradeClose, registerTradeOpen } = require("./riskGuard");
 
-let trades = readJson("trades.json", []);
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+let trades = asArray(readJson("trades.json", []));
 
 function persist() {
   writeJson("trades.json", trades);
 }
 
 async function loadOpenTrades() {
-  trades = readJson("trades.json", []);
+  trades = asArray(readJson("trades.json", []));
   console.log(`♻️ JSON'dan ${getOpenTrades().length} açık paper işlem yüklendi.`);
   return trades;
 }
@@ -76,10 +80,12 @@ async function createPaperTrade(symbol, signal, tradePlan, options = {}) {
 }
 
 function getOpenTrades() {
+  trades = asArray(trades);
   return trades.filter((t) => t.status === "OPEN");
 }
 
 function getAllTrades() {
+  trades = asArray(trades);
   return trades;
 }
 
@@ -134,6 +140,10 @@ function improvePaperRisk(trade, currentPrice) {
 }
 
 async function updatePaperTrades(symbol, currentPrice) {
+  trades = asArray(trades);
+  const price = Number(currentPrice);
+  if (!Number.isFinite(price)) return { closed: [], events: [] };
+
   const closed = [];
   const events = [];
   let changed = false;
@@ -141,7 +151,6 @@ async function updatePaperTrades(symbol, currentPrice) {
   for (const trade of trades) {
     if (trade.symbol !== symbol || trade.status !== "OPEN") continue;
 
-    const price = Number(currentPrice);
     const riskMove = improvePaperRisk(trade, price);
     if (riskMove.changed) {
       changed = true;
