@@ -6,16 +6,15 @@ function clamp(n, min, max) { return Math.max(min, Math.min(max, n)); }
 function round(n, d = 2) { return Number(Number(n || 0).toFixed(d)); }
 
 function scoreToAction(side, score, entryApproved) {
+  // Kullanıcı tarafında sadece net aksiyonlar görünsün:
+  // WAIT -> RADAR -> READY -> ENTRY
   if (!side || side === "NONE" || score < 55) return { action: "WAIT", side: "NONE" };
   if (!entryApproved) {
     if (score >= 75) return { action: `READY_${side}`, side };
     if (score >= 55) return { action: `RADAR_${side}`, side };
     return { action: "WAIT", side: "NONE" };
   }
-  if (score >= 94) return { action: `PRO_${side}`, side };
-  if (score >= 88) return { action: `STRONG_${side}`, side };
-  if (score >= 78) return { action: `ENTRY_${side}`, side };
-  return { action: "WAIT", side: "NONE" };
+  return { action: `ENTRY_${side}`, side };
 }
 
 function detectMarketRegime({ adx, atrPercent, volumeRatio, ema9, ema21, ema50, ema200, lastClose, bbWidthPercent }) {
@@ -50,8 +49,8 @@ function buildGuide(signal) {
   }
 
   let decision = "BEKLE";
-  if (signal.entryApproved) decision = `${direction} GİRİŞ ONAYI`;
-  else if (signal.entryBlocked) decision = `${direction} HAZIRLIK / GİRİŞ YOK`;
+  if (signal.entryApproved) decision = `🟢 AKSİYON: İŞLEM AÇ (${direction})`;
+  else if (signal.entryBlocked) decision = `🟡 AKSİYON: HAZIR OL / BEKLE (${direction})`;
 
   return { decision, price, next, summary: `${signal.marketRegime?.label || "Piyasa"} | Hacim x${signal.volumeRatio} | Güven ${signal.confidence}%` };
 }
@@ -427,12 +426,12 @@ function analyzeSwingPlan({ candles15m, candles1h, candles4h }) {
         ? "EARLY"
         : "WAIT";
   const entryStageLabel = entryStage === "CONFIRMED"
-    ? "🔔 GİRİŞ ONAYLANDI"
+    ? "🟢 AKSİYON: İŞLEM AÇ"
     : entryStage === "PREPARE"
-      ? "👀 HAZIRLIK — TETİK BEKLE"
+      ? "🟡 AKSİYON: HAZIR OL"
       : entryStage === "EARLY"
-        ? "⚡ ERKEN ADAY — RİSKLİ / İZLE"
-        : "⏳ BEKLE";
+        ? "👀 AKSİYON: RADAR"
+        : "⏳ AKSİYON: BEKLE";
 
   if (score < minScore) filters.push(`Skor ${score} < ${minScore} — onaylı giriş yok`);
   if (confidence < minConfidence) filters.push(`Güven ${confidence}% < ${minConfidence}% — işlem yok`);
@@ -454,7 +453,7 @@ function analyzeSwingPlan({ candles15m, candles1h, candles4h }) {
   return {
     ...entrySignal,
     mode: "SWING_PLAN",
-    action: planOk ? `PLAN_${side}` : (side && side !== "NONE" ? `WATCH_${side}` : "WAIT"),
+    action: planOk ? `ENTRY_${side}` : (entryStage === "PREPARE" ? `READY_${side}` : entryStage === "EARLY" ? `RADAR_${side}` : "WAIT"),
     side: planOk ? side : (side || "NONE"),
     score,
     confidence,
@@ -509,7 +508,7 @@ function analyzeSwingPlan({ candles15m, candles1h, candles4h }) {
       timeWindow: process.env.SWING_TIME_WINDOW || "2 saat - 2 gün",
     },
     guide: {
-      decision: planOk ? `${entryType} GİRİŞ ONAYLANDI — EMİR PLANI UYGULA` : entryStageLabel,
+      decision: planOk ? `🟢 AKSİYON: İŞLEM AÇ — ${entryType}` : entryStageLabel,
       next: planOk
         ? [
           `${side} için ${entryLow} - ${entryHigh} giriş bölgesi`,

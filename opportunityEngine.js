@@ -36,14 +36,19 @@ function estimateSignalWindow(readiness, signal) {
 
 function buildNextCondition(signal, side) {
   if (!signal || side === "NONE") return "Net yön oluşması bekleniyor.";
-  if (signal.entryTrigger?.entryType === "PULLBACK") return "Pullback dönüş onayı var; risk filtreleri kontrol ediliyor.";
-  if (signal.entryTrigger?.condition) return signal.entryTrigger.condition;
+
+  // Önemli: signal.entryTrigger.condition eski sürümlerde LONG/SHORT metnini karıştırabiliyordu.
+  // Bu yüzden radar metnini her zaman side değerine göre yeniden kuruyoruz.
+  const minVol = signal.entryTrigger?.minVolumeRatio || process.env.SWING_MIN_VOLUME_RATIO || 0.65;
   if (side === "LONG") {
-    if (!signal.breakoutConfirmed) return `${signal.resistance} üstü hacimli 15m kapanış veya EMA21 pullback dönüşü bekleniyor.`;
-    return "Long yönü onaylı; risk filtreleri kontrol ediliyor.";
+    if (signal.entryApproved) return `🟢 AKSİYON: İŞLEM AÇ. Giriş bölgesi/Stop/TP planına uy.`;
+    return `LONG için ${signal.resistance} üstü 15m hacimli kapanış VEYA EMA21/destekten yukarı dönüş bekleniyor. Hacim x${minVol}+ olmalı.`;
   }
-  if (!signal.breakdownConfirmed) return `${signal.support} altı hacimli 15m kapanış veya EMA21 pullback dönüşü bekleniyor.`;
-  return "Short yönü onaylı; risk filtreleri kontrol ediliyor.";
+  if (side === "SHORT") {
+    if (signal.entryApproved) return `🟢 AKSİYON: İŞLEM AÇ. Giriş bölgesi/Stop/TP planına uy.`;
+    return `SHORT için ${signal.support} altı 15m hacimli kapanış VEYA EMA21/dirençten aşağı dönüş bekleniyor. Hacim x${minVol}+ olmalı.`;
+  }
+  return "Net yön oluşması bekleniyor.";
 }
 
 function scoreOpportunity(signal) {
@@ -83,10 +88,10 @@ function scoreOpportunity(signal) {
   readiness = Math.max(0, Math.min(100, Math.round(readiness)));
 
   let quality = "BEKLE";
-  if (signal.entryStage === "CONFIRMED" || (signal.entryApproved && readiness >= 82)) quality = "GİRİŞ ONAYLI";
-  else if (signal.entryStage === "PREPARE" || readiness >= 72) quality = "HAZIRLIK";
-  else if (signal.entryStage === "EARLY" || readiness >= 55) quality = "ERKEN ADAY";
-  else if (readiness >= 45) quality = "İZLEME";
+  if (signal.entryStage === "CONFIRMED" || (signal.entryApproved && readiness >= 82)) quality = "🟢 İŞLEM AÇ";
+  else if (signal.entryStage === "PREPARE" || readiness >= 72) quality = "🟡 HAZIR OL";
+  else if (signal.entryStage === "EARLY" || readiness >= 55) quality = "👀 RADAR";
+  else if (readiness >= 45) quality = "👀 RADAR";
 
   const blockers = Array.isArray(signal.filters) ? signal.filters.slice(0, 2).join(" | ") : "";
   const next = buildNextCondition(signal, side);
@@ -131,11 +136,11 @@ function formatOpportunityTable(latestSignals) {
   }
 
   const rows = list.slice(0, 8).map((o, i) => {
-    const icon = o.entryApproved ? "🚀" : o.readiness >= 78 ? "🔥" : o.readiness >= 65 ? "⚠️" : o.readiness >= 50 ? "👀" : "⏳";
+    const icon = o.entryApproved ? "🟢" : o.readiness >= 75 ? "🟡" : o.readiness >= 50 ? "👀" : "⏳";
     return `${i + 1}) ${icon} <b>${o.symbol}</b> — <b>${o.quality}</b>\nYön: <b>${o.side}</b> | Hazırlık: <b>${o.readiness}/100</b> | Tahmini: <b>${o.window}</b>\nFiyat: <b>${o.price}</b> | Hacim: <b>x${o.volumeRatio}</b> | Piyasa: <b>${o.marketRegime}</b>\nBeklenen: ${o.next}${o.blockers ? `\nEngel: ${o.blockers}` : ""}`;
   }).join("\n\n");
 
-  return `📡 <b>FALIX FIRSAT RADARI</b>\n\n${rows}\n\nNot: Bu tablo kesinlik değil, <b>hazırlık derecesi</b> gösterir. Onay gelmeden işlem açma.`;
+  return `📡 <b>FALIX FIRSAT RADARI</b>\n\n${rows}\n\nNot: <b>🟢 İŞLEM AÇ</b> mesajı gelmeden işlem açma. Radar ve Hazır Ol mesajları sadece hazırlıktır.`;
 }
 
 module.exports = {

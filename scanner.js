@@ -21,13 +21,24 @@ let lastOpportunityRadarAt = 0;
 let latestSignals = {};
 let scanRunning = false;
 let lastWatchAlerts = {};
+let entryLocks = {};
 
 function getSignalLevel(score) {
-  if (score >= 92) return "🔥 ÇOK GÜÇLÜ";
-  if (score >= 85) return "🚀 İŞLEM ADAYI";
-  if (score >= 70) return "⚠️ HAZIRLIK";
-  if (score >= 55) return "👀 İZLEME";
+  if (score >= 85) return "🟢 İŞLEM AÇ ADAYI";
+  if (score >= 75) return "🟡 HAZIR OL";
+  if (score >= 55) return "👀 RADAR";
   return "⏳ BEKLE";
+}
+
+function hasRecentEntryLock(symbol) {
+  const lock = entryLocks[symbol];
+  if (!lock) return false;
+  const cooldownMs = Number(process.env.ENTRY_SIGNAL_LOCK_MINUTES || 30) * 60 * 1000;
+  return Date.now() - lock.at < cooldownMs;
+}
+
+function setEntryLock(symbol, side) {
+  entryLocks[symbol] = { side, at: Date.now() };
 }
 
 function shouldSendUrgent(trade, advice) {
@@ -79,6 +90,7 @@ function getWatchKey(symbol, signal) {
 function shouldSendWatchAlert(symbol, signal) {
   if (!signal || !signal.side || signal.side === "NONE") return false;
   if (signal.entryApproved) return false;
+  if (getActiveTrackedTradesBySymbol(symbol).length > 0 || hasRecentEntryLock(symbol)) return false;
   const minScore = Number(process.env.WATCH_ALERT_SCORE || 60);
   if (Number(signal.score || 0) < minScore) return false;
 
@@ -96,8 +108,11 @@ function buildWatchMessage(symbol, signal) {
   const side = signal.side && signal.side !== "NONE" ? signal.side : "BEKLE";
   const t = signal.entryTrigger || {};
   const stage = signal.entryStage || (Number(signal.score || 0) >= 75 ? "PREPARE" : "EARLY");
-  const title = stage === "PREPARE" ? "👀 FALIX HAZIRLIK" : "⚡ FALIX ERKEN ADAY";
-  const riskLabel = stage === "PREPARE" ? "Orta" : "Yüksek";
+  const title = stage === "PREPARE" ? "🟡 <b>AKSİYON: HAZIR OL</b>" : "👀 <b>AKSİYON: RADAR</b>";
+  const instruction = stage === "PREPARE"
+    ? "Henüz işlem açma. Tetik oluşursa ayrı bir <b>🟢 İŞLEM AÇ</b> mesajı gelecek."
+    : "Sadece izle. Bu mesaj işlem açma komutu değildir.";
+
   const triggerPrice = t.triggerPrice || (side === "LONG" ? signal.resistance : signal.support);
   const distance = triggerPrice && signal.lastClose
     ? Math.abs(((Number(triggerPrice) - Number(signal.lastClose)) / Number(signal.lastClose)) * 100).toFixed(2)
@@ -106,11 +121,15 @@ function buildWatchMessage(symbol, signal) {
   const zoneLow = t.entryZoneLow || signal.plan?.entryLow || "-";
   const zoneHigh = t.entryZoneHigh || signal.plan?.entryHigh || "-";
   const breakoutLine = side === "LONG"
-    ? `Breakout: ${signal.resistance} üstü 15m hacimli kapanış`
-    : `Breakout: ${signal.support} altı 15m hacimli kapanış`;
+    ? `LONG için ${signal.resistance} üstü 15m hacimli kapanış`
+    : side === "SHORT"
+      ? `SHORT için ${signal.support} altı 15m hacimli kapanış`
+      : "Net yön oluşması bekleniyor";
   const pullbackLine = side === "LONG"
-    ? `Pullback: EMA21/destekten dönüş + hacim korunması`
-    : `Pullback: EMA21/dirençten dönüş + hacim korunması`;
+    ? "LONG için EMA21/destekten yukarı dönüş + hacim korunması"
+    : side === "SHORT"
+      ? "SHORT için EMA21/dirençten aşağı dönüş + hacim korunması"
+      : "Pullback için net yön bekleniyor";
 
   return `
 ${title}
@@ -118,26 +137,23 @@ ${title}
 <b>${symbol}</b>
 Yön: <b>${side}</b>
 Skor: <b>${signal.score}/100</b> | Güven: <b>${signal.confidence || signal.score}%</b>
-Risk: <b>${riskLabel}</b>
 Fiyat: <b>${signal.lastClose}</b> | Hacim: <b>x${signal.volumeRatio}</b>
 
 📍 <b>Olası Giriş Bölgesi</b>
 ${zoneLow} - ${zoneHigh}
 
-⏳ <b>ŞU AN TAM ONAY YOK</b>
-Bot fırsat adayı gördü. İşlem için tetik beklenir.
+⏳ <b>Komut</b>
+${instruction}
 
-🔔 <b>Giriş Tetikleri</b>
+🔔 <b>Beklenen Tetik</b>
 • ${breakoutLine}
 • ${pullbackLine}
 
-📏 <b>Kırılıma Kalan Mesafe</b>
+📏 <b>Tetiğe Kalan Mesafe</b>
 %${distance}
 
 ⛔ <b>Eksik / Engel</b>
 ${signal.filters?.slice(0, 4).map((r) => `• ${r}`).join("\n") || "• Net onay bekleniyor"}
-
-📌 Şart oluşursa bot ayrı mesajla <b>🔔 GİRİŞ ONAYLANDI</b> gönderecek.
 `;
 }
 
@@ -147,16 +163,13 @@ function buildSignalMessage(symbol, signal, tradePlan) {
   const entryTypeLabel = entryType === "PULLBACK" ? "Pullback / erken dönüş" : "Breakout / kırılım";
 
   return `
-🔔 <b>GİRİŞ ONAYLANDI — FALIX EMİR PLANI</b>
+🟢 <b>AKSİYON: İŞLEM AÇ</b>
 
 <b>${symbol}</b>
-İşlem: <b>${signal.side}</b>
+Yön: <b>${signal.side}</b>
 Giriş Tipi: <b>${entryTypeLabel}</b>
 Skor: <b>${signal.score}/100</b> | Güven: <b>${signal.confidence}%</b>
 Süre: <b>${tradePlan.timeWindow}</b>
-
-✅ <b>Ne zaman girilir?</b>
-Şart oluştu. Giriş bölgesinden manuel işlem açılabilir.
 
 📥 <b>Giriş Bölgesi</b>
 <b>${tradePlan.entryLow} - ${tradePlan.entryHigh}</b>
@@ -176,12 +189,10 @@ Risk/Ödül: <b>1:${tradePlan.riskReward}</b>
 Kaldıraç: <b>${tradePlan.leverage}x</b>
 Tahmini marjin: <b>${tradePlan.estimatedMarginUsdt} USDT</b>
 
-📌 <b>Uygulama</b>
-• Giriş bölgesinden aç.
-• Stop kesin.
-• TP1 gelirse %30 kapat + stop'u girişe çek.
-• TP2 gelirse %40 kapat.
-• TP3 gelirse kalan kapat.
+📌 <b>Net Komut</b>
+✅ Bu mesaj gelirse işlem açılabilir.
+✅ Stop ve TP olmadan işlem açma.
+✅ TP1 gelirse kârın bir kısmını al ve stop'u girişe çek.
 
 <b>Sebep</b>
 ${signal.reasons.slice(0, 6).map((r) => `✅ ${r}`).join("\n")}
@@ -210,7 +221,7 @@ async function sendMarketSummaryIfNeeded() {
 
 ${rows}
 
-Açık pozisyon varsa bot her ${process.env.FOLLOW_REPORT_SECONDS || 60} saniyede takip eder; riskte anında uyarır.
+Açık pozisyon varsa bot takip eder. Aksiyon dili: BEKLE / HAZIR OL / İŞLEM AÇ / POZİSYONU KORU / ÇIK.
 `);
   }
 
@@ -288,8 +299,10 @@ TP1/TP2/TP3: <b>${paperTrade.tp1Price}</b> / <b>${paperTrade.tp2Price}</b> / <b>
     });
   }
 
+  setEntryLock(symbol, signal.side);
+
   await sendTelegramWithButtons(buildSignalMessage(symbol, signal, tradePlan), [
-    [{ text: "✅ Açtım / Canlı Takibe Al", callback_data: `TRACK:${symbol}:${approval.id}` }],
+    [{ text: "📊 Açtım / Pozisyonu Takibe Al", callback_data: `TRACK:${symbol}:${approval.id}` }],
     [{ text: "❌ Açmadım", callback_data: `IGNORE:${symbol}:${approval.id}` }],
   ]);
 
