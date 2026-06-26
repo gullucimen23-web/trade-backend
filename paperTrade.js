@@ -1,5 +1,5 @@
 const { readJson, writeJson } = require("./dataStore");
-const { registerTradeClose } = require("./riskGuard");
+const { registerTradeClose, registerTradeOpen } = require("./riskGuard");
 
 let trades = readJson("trades.json", []);
 
@@ -13,37 +13,65 @@ async function loadOpenTrades() {
   return trades;
 }
 
-async function createPaperTrade(symbol, signal, tradePlan) {
-  const exists = trades.find(
-    (t) => t.symbol === symbol && t.status === "OPEN"
-  );
+async function createPaperTrade(symbol, signal, tradePlan, options = {}) {
+  const allowMultiple = process.env.PAPER_ALLOW_MULTIPLE_PER_SYMBOL === "true";
+  const exists = trades.find((t) => t.symbol === symbol && t.status === "OPEN");
+  if (exists && !allowMultiple) return null;
 
-  if (exists) return null;
+  const tradeNo = Number(readJson("paper_counter.json", { value: 0 }).value || 0) + 1;
+  writeJson("paper_counter.json", { value: tradeNo });
+  const id = `FALIX-${String(tradeNo).padStart(6, "0")}`;
 
   const trade = {
-    id: Date.now().toString(),
+    id,
     symbol,
     side: tradePlan.side,
     status: "OPEN",
     entry: Number(tradePlan.entry),
-    takeProfitPrice: Number(tradePlan.takeProfitPrice),
+    exit: null,
+    tp1Price: Number(tradePlan.tp1Price || tradePlan.takeProfitPrice),
+    tp2Price: Number(tradePlan.tp2Price || tradePlan.takeProfitPrice),
+    tp3Price: Number(tradePlan.tp3Price || tradePlan.takeProfitPrice),
+    takeProfitPrice: Number(tradePlan.tp3Price || tradePlan.takeProfitPrice),
     originalStopLossPrice: Number(tradePlan.stopLossPrice),
     stopLossPrice: Number(tradePlan.stopLossPrice),
     activeStopLossPrice: Number(tradePlan.stopLossPrice),
-    takeProfitPercent: tradePlan.takeProfitPercent,
+    tp1Done: false,
+    tp2Done: false,
+    tp3Done: false,
+    tp1ClosePercent: Number(tradePlan.tp1ClosePercent || 30),
+    tp2ClosePercent: Number(tradePlan.tp2ClosePercent || 40),
+    tp3ClosePercent: Number(tradePlan.tp3ClosePercent || 30),
+    takeProfitPercent: tradePlan.takeProfitPercent || tradePlan.tp3Percent,
     stopLossPercent: tradePlan.stopLossPercent,
     positionSizePercent: tradePlan.positionSizePercent,
     leverage: tradePlan.leverage,
     score: signal.score,
+    confidence: signal.confidence,
+    volumeRatio: signal.volumeRatio,
+    riskReward: tradePlan.riskReward,
+    plan: tradePlan,
+    signalSnapshot: {
+      score: signal.score,
+      confidence: signal.confidence,
+      volumeRatio: signal.volumeRatio,
+      marketRegime: signal.marketRegime?.label,
+      reasons: signal.reasons || [],
+      filters: signal.filters || [],
+    },
+    reason: (signal.reasons || []).slice(0, 4).join(" | "),
     openedAt: new Date().toISOString(),
     bestPrice: Number(tradePlan.entry),
     highestPnlPercent: 0,
+    partialRealizedPnlPercent: 0,
     riskLevel: "INITIAL_RISK",
     trailStep: 0,
+    source: options.source || "AUTO_PAPER",
   };
 
   trades.push(trade);
   persist();
+  registerTradeOpen();
   return trade;
 }
 
@@ -107,38 +135,66 @@ function improvePaperRisk(trade, currentPrice) {
 
 async function updatePaperTrades(symbol, currentPrice) {
   const closed = [];
+  const events = [];
   let changed = false;
 
   for (const trade of trades) {
     if (trade.symbol !== symbol || trade.status !== "OPEN") continue;
 
-    const riskMove = improvePaperRisk(trade, Number(currentPrice));
-    if (riskMove.changed) changed = true;
+    const price = Number(currentPrice);
+    const riskMove = improvePaperRisk(trade, price);
+    if (riskMove.changed) {
+      changed = true;
+      events.push({ type: "RISK_MOVED", trade, message: riskMove.riskMessage, price, pnlPercent: riskMove.pnlPercent });
+    }
 
     const isLong = trade.side === "LONG";
     const activeStop = Number(trade.activeStopLossPrice || trade.stopLossPrice);
+    const hit = (level) => isLong ? price >= Number(level) : price <= Number(level);
 
-    const hitTp = isLong
-      ? currentPrice >= trade.takeProfitPrice
-      : currentPrice <= trade.takeProfitPrice;
+    const pnlNow = calculatePnlPercent(trade, price);
+    if (!trade.tp1Done && hit(trade.tp1Price)) {
+      trade.tp1Done = true;
+      trade.tp1At = new Date().toISOString();
+      trade.partialRealizedPnlPercent = Number((Number(trade.partialRealizedPnlPercent || 0) + pnlNow * (Number(trade.tp1ClosePercent || 30) / 100)).toFixed(2));
+      trade.activeStopLossPrice = trade.entry;
+      trade.stopLossPrice = trade.entry;
+      trade.riskLevel = "TP1_BREAK_EVEN";
+      changed = true;
+      events.push({ type: "TP1", trade, price, pnlPercent: pnlNow });
+    }
 
-    const hitSl = isLong
-      ? currentPrice <= activeStop
-      : currentPrice >= activeStop;
+    if (!trade.tp2Done && hit(trade.tp2Price)) {
+      trade.tp2Done = true;
+      trade.tp2At = new Date().toISOString();
+      trade.partialRealizedPnlPercent = Number((Number(trade.partialRealizedPnlPercent || 0) + pnlNow * (Number(trade.tp2ClosePercent || 40) / 100)).toFixed(2));
+      changed = true;
+      events.push({ type: "TP2", trade, price, pnlPercent: pnlNow });
+    }
 
-    if (hitTp || hitSl) {
-      trade.status = hitTp ? "CLOSED_TP" : "CLOSED_SL";
-      trade.exit = Number(currentPrice);
-      trade.pnlPercent = calculatePnlPercent(trade, Number(currentPrice));
+    const hitTp3 = !trade.tp3Done && hit(trade.tp3Price);
+    const hitSl = isLong ? price <= activeStop : price >= activeStop;
+
+    if (hitTp3 || hitSl) {
+      if (hitTp3) {
+        trade.tp3Done = true;
+        trade.tp3At = new Date().toISOString();
+      }
+      trade.status = hitTp3 ? "CLOSED_TP" : "CLOSED_SL";
+      trade.exit = price;
+      const finalWeight = trade.tp1Done || trade.tp2Done ? Number(trade.tp3ClosePercent || 30) / 100 : 1;
+      const finalPnl = pnlNow * finalWeight;
+      trade.pnlPercent = Number((Number(trade.partialRealizedPnlPercent || 0) + finalPnl).toFixed(2));
       trade.closedAt = new Date().toISOString();
       registerTradeClose(trade.pnlPercent);
       closed.push(trade);
+      events.push({ type: trade.status, trade, price, pnlPercent: trade.pnlPercent });
       changed = true;
     }
   }
 
   if (changed) persist();
-  return closed;
+  return { closed, events };
 }
 
 module.exports = {

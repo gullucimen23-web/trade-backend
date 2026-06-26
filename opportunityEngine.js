@@ -27,7 +27,7 @@ function getOppositeScore(signal, side) {
 
 function estimateSignalWindow(readiness, signal) {
   const vol = toNum(signal?.volumeRatio, 0);
-  if (signal?.entryApproved) return "ŞİMDİ / ONAYLI";
+  if (signal?.entryApproved) return signal?.entryTrigger?.entryType === "PULLBACK" ? "ŞİMDİ / PULLBACK" : "ŞİMDİ / ONAYLI";
   if (readiness >= 85 && vol >= 0.75) return "5-15 dk";
   if (readiness >= 72) return "15-45 dk";
   if (readiness >= 60) return "45-120 dk";
@@ -36,11 +36,13 @@ function estimateSignalWindow(readiness, signal) {
 
 function buildNextCondition(signal, side) {
   if (!signal || side === "NONE") return "Net yön oluşması bekleniyor.";
+  if (signal.entryTrigger?.entryType === "PULLBACK") return "Pullback dönüş onayı var; risk filtreleri kontrol ediliyor.";
+  if (signal.entryTrigger?.condition) return signal.entryTrigger.condition;
   if (side === "LONG") {
-    if (!signal.breakoutConfirmed) return `${signal.resistance} üstü hacimli 5m kapanış bekleniyor.`;
+    if (!signal.breakoutConfirmed) return `${signal.resistance} üstü hacimli 15m kapanış veya EMA21 pullback dönüşü bekleniyor.`;
     return "Long yönü onaylı; risk filtreleri kontrol ediliyor.";
   }
-  if (!signal.breakdownConfirmed) return `${signal.support} altı hacimli 5m kapanış bekleniyor.`;
+  if (!signal.breakdownConfirmed) return `${signal.support} altı hacimli 15m kapanış veya EMA21 pullback dönüşü bekleniyor.`;
   return "Short yönü onaylı; risk filtreleri kontrol ediliyor.";
 }
 
@@ -73,6 +75,7 @@ function scoreOpportunity(signal) {
   readiness += Math.min(15, vol * 10);
   if (signal.entryApproved) readiness += 18;
   if (signal.breakoutConfirmed || signal.breakdownConfirmed) readiness += 10;
+  if (signal.entryTrigger?.pullbackConfirmed) readiness += 10;
   if (!regimeAllows) readiness -= 18;
   if (blocked) readiness -= 8;
   if (vol < 0.55) readiness -= 18;
@@ -80,10 +83,10 @@ function scoreOpportunity(signal) {
   readiness = Math.max(0, Math.min(100, Math.round(readiness)));
 
   let quality = "BEKLE";
-  if (signal.entryApproved && readiness >= 88) quality = "ONAYLI SİNYAL";
-  else if (readiness >= 78) quality = "ÇOK YAKIN";
-  else if (readiness >= 65) quality = "HAZIRLIK";
-  else if (readiness >= 50) quality = "İZLEME";
+  if (signal.entryStage === "CONFIRMED" || (signal.entryApproved && readiness >= 82)) quality = "GİRİŞ ONAYLI";
+  else if (signal.entryStage === "PREPARE" || readiness >= 72) quality = "HAZIRLIK";
+  else if (signal.entryStage === "EARLY" || readiness >= 55) quality = "ERKEN ADAY";
+  else if (readiness >= 45) quality = "İZLEME";
 
   const blockers = Array.isArray(signal.filters) ? signal.filters.slice(0, 2).join(" | ") : "";
   const next = buildNextCondition(signal, side);
@@ -101,6 +104,8 @@ function scoreOpportunity(signal) {
     price: signal.lastClose,
     resistance: signal.resistance,
     support: signal.support,
+    entryStage: signal.entryStage || "WAIT",
+    entryStageLabel: signal.entryStageLabel || "⏳ BEKLE",
     entryApproved: !!signal.entryApproved,
     entryBlocked: !!signal.entryBlocked,
     marketRegime: signal.marketRegime?.label || "-",

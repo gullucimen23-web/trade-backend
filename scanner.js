@@ -3,7 +3,7 @@ const { analyzeMarket, analyzeMultiTimeframe, analyzeSwingPlan } = require("./st
 const { askOpenAIWithGuard } = require("./openaiGuard");
 const { sendTelegram, sendTelegramWithButtons } = require("./telegram");
 const { buildTradePlan } = require("./risk");
-const { updatePaperTrades } = require("./paperTrade");
+const { updatePaperTrades, createPaperTrade } = require("./paperTrade");
 const { canOpenTrade } = require("./riskGuard");
 const { createApproval } = require("./approvalStore");
 const { isBotActive } = require("./botState");
@@ -95,38 +95,47 @@ function shouldSendWatchAlert(symbol, signal) {
 function buildWatchMessage(symbol, signal) {
   const side = signal.side && signal.side !== "NONE" ? signal.side : "BEKLE";
   const t = signal.entryTrigger || {};
-  const triggerLine = t.condition || (side === "LONG"
-    ? `15m mum ${signal.resistance} üstünde hacimli kapanmalı`
-    : `15m mum ${signal.support} altında hacimli kapanmalı`);
+  const stage = signal.entryStage || (Number(signal.score || 0) >= 75 ? "PREPARE" : "EARLY");
+  const title = stage === "PREPARE" ? "👀 FALIX HAZIRLIK" : "⚡ FALIX ERKEN ADAY";
+  const riskLabel = stage === "PREPARE" ? "Orta" : "Yüksek";
   const triggerPrice = t.triggerPrice || (side === "LONG" ? signal.resistance : signal.support);
   const distance = triggerPrice && signal.lastClose
     ? Math.abs(((Number(triggerPrice) - Number(signal.lastClose)) / Number(signal.lastClose)) * 100).toFixed(2)
     : "-";
 
+  const zoneLow = t.entryZoneLow || signal.plan?.entryLow || "-";
+  const zoneHigh = t.entryZoneHigh || signal.plan?.entryHigh || "-";
+  const breakoutLine = side === "LONG"
+    ? `Breakout: ${signal.resistance} üstü 15m hacimli kapanış`
+    : `Breakout: ${signal.support} altı 15m hacimli kapanış`;
+  const pullbackLine = side === "LONG"
+    ? `Pullback: EMA21/destekten dönüş + hacim korunması`
+    : `Pullback: EMA21/dirençten dönüş + hacim korunması`;
+
   return `
-🟡 <b>FALIX HAZIRLIK / GİRİŞ BEKLENİYOR</b>
+${title}
 
-Parite: <b>${symbol}</b>
-Yön Adayı: <b>${side}</b>
-Skor: <b>${signal.score}/100</b>
-Güven: <b>${signal.confidence || signal.score}%</b>
-Fiyat: <b>${signal.lastClose}</b>
-Hacim: <b>x${signal.volumeRatio}</b>
+<b>${symbol}</b>
+Yön: <b>${side}</b>
+Skor: <b>${signal.score}/100</b> | Güven: <b>${signal.confidence || signal.score}%</b>
+Risk: <b>${riskLabel}</b>
+Fiyat: <b>${signal.lastClose}</b> | Hacim: <b>x${signal.volumeRatio}</b>
 
-⏳ <b>ŞU AN GİRME</b>
-Bot sadece hazırlık gördü. Giriş için tetik bekleniyor.
+📍 <b>Olası Giriş Bölgesi</b>
+${zoneLow} - ${zoneHigh}
 
-🔔 <b>Giriş Onayı İçin Şart</b>
-${triggerLine}
+⏳ <b>ŞU AN TAM ONAY YOK</b>
+Bot fırsat adayı gördü. İşlem için tetik beklenir.
 
-📍 <b>Tetik Fiyatı</b>
-${triggerPrice || "-"}
+🔔 <b>Giriş Tetikleri</b>
+• ${breakoutLine}
+• ${pullbackLine}
 
-📏 <b>Girişe Kalan Mesafe</b>
+📏 <b>Kırılıma Kalan Mesafe</b>
 %${distance}
 
 ⛔ <b>Eksik / Engel</b>
-${signal.filters?.slice(0, 5).map((r) => `• ${r}`).join("\n") || "• Net onay bekleniyor"}
+${signal.filters?.slice(0, 4).map((r) => `• ${r}`).join("\n") || "• Net onay bekleniyor"}
 
 📌 Şart oluşursa bot ayrı mesajla <b>🔔 GİRİŞ ONAYLANDI</b> gönderecek.
 `;
@@ -134,47 +143,50 @@ ${signal.filters?.slice(0, 5).map((r) => `• ${r}`).join("\n") || "• Net onay
 
 function buildSignalMessage(symbol, signal, tradePlan) {
   const t = signal.entryTrigger || {};
-  return `
-🔔 <b>GİRİŞ ONAYLANDI — FALIX SWING EMİR PLANI</b>
+  const entryType = t.entryType || "BREAKOUT";
+  const entryTypeLabel = entryType === "PULLBACK" ? "Pullback / erken dönüş" : "Breakout / kırılım";
 
-Parite: <b>${symbol}</b>
+  return `
+🔔 <b>GİRİŞ ONAYLANDI — FALIX EMİR PLANI</b>
+
+<b>${symbol}</b>
 İşlem: <b>${signal.side}</b>
-Skor: <b>${signal.score}/100</b>
-Güven: <b>${signal.confidence}%</b>
+Giriş Tipi: <b>${entryTypeLabel}</b>
+Skor: <b>${signal.score}/100</b> | Güven: <b>${signal.confidence}%</b>
 Süre: <b>${tradePlan.timeWindow}</b>
 
-✅ <b>Giriş Şartı Oluştu</b>
-${t.condition || "15m giriş onayı tamamlandı"}
+✅ <b>Ne zaman girilir?</b>
+Şart oluştu. Giriş bölgesinden manuel işlem açılabilir.
 
 📥 <b>Giriş Bölgesi</b>
-${tradePlan.entryLow} - ${tradePlan.entryHigh}
+<b>${tradePlan.entryLow} - ${tradePlan.entryHigh}</b>
 
 🛑 <b>Stop</b>
-${tradePlan.stopLossPrice}  (%${tradePlan.stopLossPercent})
+<b>${tradePlan.stopLossPrice}</b>  (%${tradePlan.stopLossPercent})
 
-🎯 <b>Kâr Alma Planı</b>
+🎯 <b>Kâr Alma</b>
 TP1: <b>${tradePlan.tp1Price}</b> → %${tradePlan.tp1ClosePercent} kapat
 TP2: <b>${tradePlan.tp2Price}</b> → %${tradePlan.tp2ClosePercent} kapat
-TP3: <b>${tradePlan.tp3Price}</b> → kalan %${tradePlan.tp3ClosePercent} kapat
+TP3: <b>${tradePlan.tp3Price}</b> → kalan %${tradePlan.tp3ClosePercent}
 
-💰 <b>Hedef Kâr</b>
-Yaklaşık: <b>${tradePlan.targetProfitUsdt} USDT</b>
-Gerekli tahmini marjin: <b>${tradePlan.estimatedMarginUsdt} USDT</b>
-Kaldıraç: <b>${tradePlan.leverage}x</b>
+💰 <b>Plan Özeti</b>
+Hedef: <b>${tradePlan.targetProfitUsdt} USDT</b>
 Tahmini risk: <b>${tradePlan.estimatedRiskUsdt} USDT</b>
 Risk/Ödül: <b>1:${tradePlan.riskReward}</b>
+Kaldıraç: <b>${tradePlan.leverage}x</b>
+Tahmini marjin: <b>${tradePlan.estimatedMarginUsdt} USDT</b>
 
-📌 <b>Uygulama Kuralı</b>
-• Giriş bölgesinden işlem açılır.
-• Stop kesin uygulanır.
-• TP1 gelirse %30 kapat ve stop'u girişe çek.
+📌 <b>Uygulama</b>
+• Giriş bölgesinden aç.
+• Stop kesin.
+• TP1 gelirse %30 kapat + stop'u girişe çek.
 • TP2 gelirse %40 kapat.
-• TP3 gelirse kalan pozisyon kapatılır.
+• TP3 gelirse kalan kapat.
 
-Sebep:
+<b>Sebep</b>
 ${signal.reasons.slice(0, 6).map((r) => `✅ ${r}`).join("\n")}
 
-⚠️ Bu otomatik al-sat değildir. Kullanıcı planı uygular, bot takip eder.
+⚠️ Bu otomatik emir değildir; karar kullanıcıdadır.
 `;
 }
 
@@ -255,6 +267,20 @@ async function scanSymbol(symbol) {
 
   const tradePlan = buildTradePlan(symbol, signal);
   const approval = createApproval(symbol, signal, tradePlan);
+
+  if (process.env.AUTO_PAPER_TRADING !== "false") {
+    const paperTrade = await createPaperTrade(symbol, signal, tradePlan, { source: "AUTO_SIGNAL" });
+    if (paperTrade) {
+      console.log("🧪 Auto paper trade açıldı:", paperTrade.id, symbol, signal.side);
+      if (process.env.PAPER_OPEN_NOTIFY === "true") {
+        await sendTelegram(`🧪 <b>Paper Trade Açıldı</b>
+${paperTrade.id} — ${symbol} ${signal.side}
+Entry: <b>${paperTrade.entry}</b>
+Stop: <b>${paperTrade.stopLossPrice}</b>
+TP1/TP2/TP3: <b>${paperTrade.tp1Price}</b> / <b>${paperTrade.tp2Price}</b> / <b>${paperTrade.tp3Price}</b>`);
+      }
+    }
+  }
 
   if (process.env.OPENAI_SIGNAL_REVIEW === "true") {
     askOpenAIWithGuard({ symbol, signal, tradePlan }).catch((err) => {

@@ -42,3 +42,9 @@ OPENAI_SIGNAL_REVIEW=false
 ÖNEMLİ
 Bu sistem otomatik emir açmaz. Kullanıcı planı kendisi uygular.
 Canlı para ile kullanmadan önce paper/test sonuçlarını takip et.
+
+
+# Pullback giriş modu: breakout beklemeden EMA21/destek-direnç dönüşünü de test eder
+ENABLE_PULLBACK_ENTRY=true
+PULLBACK_MIN_VOLUME_RATIO=0.75
+PULLBACK_MAX_DISTANCE_PERCENT=0.85

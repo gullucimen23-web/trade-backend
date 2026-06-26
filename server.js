@@ -8,6 +8,7 @@ const { analyzeMarket, analyzeMultiTimeframe } = require("./strategy");
 const { startScanner, runScanCycle, getLatestSignals, getOpportunityRadar, getOpportunityRadarText } = require("./scanner");
 const { getSpotAccount } = require("./binancePrivate");
 const { loadOpenTrades, getOpenTrades, getAllTrades, createPaperTrade } = require("./paperTrade");
+const { buildWeeklyReport, formatWeeklyReport, exportTradesCsv } = require("./paperReport");
 const { getRiskStats, registerTradeOpen } = require("./riskGuard");
 const { isBotActive, startBot, stopBot, getBotState } = require("./botState");
 const { getApproval, approveTrade, rejectTrade, getAllApprovals } = require("./approvalStore");
@@ -186,6 +187,19 @@ app.get("/test-binance", async (req, res) => {
 
 app.get("/paper/open", (req, res) => res.json({ ok: true, trades: getOpenTrades() }));
 app.get("/paper/all", (req, res) => res.json({ ok: true, trades: getAllTrades() }));
+app.get("/paper/report", (req, res) => {
+  const report = buildWeeklyReport(getAllTrades(), { days: Number(req.query.days || process.env.REPORT_DAYS || 7) });
+  res.json({ ok: true, report, text: formatWeeklyReport(report) });
+});
+app.get("/paper/report/send", async (req, res) => {
+  const report = buildWeeklyReport(getAllTrades(), { days: Number(req.query.days || process.env.REPORT_DAYS || 7) });
+  await sendTelegram(formatWeeklyReport(report));
+  res.json({ ok: true, sent: true, report });
+});
+app.get("/paper/export", (req, res) => {
+  const fp = exportTradesCsv(getAllTrades());
+  res.download(fp, "paper_trades.csv");
+});
 app.get("/risk", (req, res) => res.json({ ok: true, stats: getRiskStats() }));
 
 
@@ -347,8 +361,6 @@ app.get("/approve/:symbol", async (req, res) => {
 
     approveTrade(symbol);
     const paperTrade = await createPaperTrade(symbol, approval.signal, approval.tradePlan);
-    if (paperTrade) registerTradeOpen();
-
     await sendTelegram(`✅ ONAYLANDI VE PAPER TRADE AÇILDI\n${symbol}\n${approval.side}\nSkor: ${approval.score}`);
     res.json({ ok: true, message: "Onaylandı ve paper trade açıldı", paperTrade, approval });
   } catch (err) {
@@ -366,6 +378,22 @@ app.get("/reject/:symbol", async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 
+function startPaperReportScheduler() {
+  if (process.env.WEEKLY_REPORT_ENABLED === "false") return;
+  const hours = Math.max(1, Number(process.env.REPORT_EVERY_HOURS || 24));
+  const send = async () => {
+    try {
+      const report = buildWeeklyReport(getAllTrades(), { days: Number(process.env.REPORT_DAYS || 7) });
+      if (process.env.REPORT_SEND_EMPTY !== "true" && report.total === 0) return;
+      await sendTelegram(formatWeeklyReport(report));
+    } catch (err) {
+      console.error("Paper rapor gönderim hatası:", err.message);
+    }
+  };
+  setInterval(send, hours * 60 * 60 * 1000);
+  console.log(`📊 Paper rapor zamanlayıcı aktif: ${hours} saatte bir`);
+}
+
 async function startApp() {
   app.listen(PORT, () => {
     console.log(`✅ Bot backend çalışıyor: http://localhost:${PORT}`);
@@ -378,6 +406,7 @@ async function startApp() {
   }
 
   startScanner();
+  startPaperReportScheduler();
 }
 
 startApp();

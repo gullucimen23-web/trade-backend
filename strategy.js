@@ -236,6 +236,7 @@ function analyzeMarket(candles, options = {}) {
     breakdownDistance: round(breakdownDistance, 2),
     breakoutConfirmed,
     breakdownConfirmed,
+    priceMomentum: round(priceMomentum, 3),
     reasons,
   };
   base.guide = buildGuide(base);
@@ -329,10 +330,51 @@ function analyzeSwingPlan({ candles15m, candles1h, candles4h }) {
 
   const triggerPrice = side === "LONG" ? Number(entrySignal.resistance || entrySignal.lastClose) : Number(entrySignal.support || entrySignal.lastClose);
   const triggerConfirmed = side === "LONG" ? Boolean(entrySignal.breakoutConfirmed) : Boolean(entrySignal.breakdownConfirmed);
-  const triggerOk = !requireEntryTrigger || triggerConfirmed;
-  const triggerCondition = side === "LONG"
-    ? `15m mum ${round(triggerPrice, 4)} üstünde kapanmalı + hacim x${minVolume}+ olmalı`
-    : `15m mum ${round(triggerPrice, 4)} altında kapanmalı + hacim x${minVolume}+ olmalı`;
+
+  // v2: Sadece kırılım bekleyen sistem fırsat kaçırıyordu.
+  // Bu yüzden ikinci giriş tipi eklendi: PULLBACK / destekten-dirençten dönüş.
+  // Breakout = daha geç ama daha temiz. Pullback = daha erken, stop daha yakın.
+  const enablePullbackEntry = process.env.ENABLE_PULLBACK_ENTRY !== "false";
+  const ema21 = Number(entrySignal.ema21 || entrySignal.lastClose);
+  const ema9 = Number(entrySignal.ema9 || entrySignal.lastClose);
+  const price = Number(entrySignal.lastClose || 0);
+  const rsi = Number(entrySignal.rsi || 50);
+  const momentum = Number(entrySignal.priceMomentum || 0);
+  const nearEma21Pct = price && ema21 ? Math.abs((price - ema21) / price) * 100 : 99;
+  const nearLevelPct = side === "LONG"
+    ? (price && entrySignal.support ? Math.abs((price - Number(entrySignal.support)) / price) * 100 : 99)
+    : (price && entrySignal.resistance ? Math.abs((Number(entrySignal.resistance) - price) / price) * 100 : 99);
+  const pullbackMaxDistance = Number(process.env.PULLBACK_MAX_DISTANCE_PERCENT || 0.85);
+  const pullbackMinVolume = Number(process.env.PULLBACK_MIN_VOLUME_RATIO || Math.min(minVolume, 0.75));
+  const pullbackLong = side === "LONG"
+    && enablePullbackEntry
+    && Number(entrySignal.volumeRatio || 0) >= pullbackMinVolume
+    && ema9 >= ema21
+    && price >= ema21 * 0.998
+    && (nearEma21Pct <= pullbackMaxDistance || nearLevelPct <= pullbackMaxDistance)
+    && rsi >= 38 && rsi <= 62
+    && momentum >= -0.18;
+  const pullbackShort = side === "SHORT"
+    && enablePullbackEntry
+    && Number(entrySignal.volumeRatio || 0) >= pullbackMinVolume
+    && ema9 <= ema21
+    && price <= ema21 * 1.002
+    && (nearEma21Pct <= pullbackMaxDistance || nearLevelPct <= pullbackMaxDistance)
+    && rsi >= 38 && rsi <= 62
+    && momentum <= 0.18;
+  const pullbackConfirmed = side === "LONG" ? pullbackLong : side === "SHORT" ? pullbackShort : false;
+  const entryType = triggerConfirmed ? "BREAKOUT" : pullbackConfirmed ? "PULLBACK" : "WAIT_TRIGGER";
+  const triggerOk = !requireEntryTrigger || triggerConfirmed || pullbackConfirmed;
+
+  const breakoutCondition = side === "LONG"
+    ? `Breakout: 15m mum ${round(triggerPrice, 4)} üstünde kapanmalı + hacim x${minVolume}+ olmalı`
+    : `Breakout: 15m mum ${round(triggerPrice, 4)} altında kapanmalı + hacim x${minVolume}+ olmalı`;
+  const pullbackCondition = side === "LONG"
+    ? `Pullback: fiyat EMA21/destek bölgesinden yukarı dönmeli + hacim x${pullbackMinVolume}+ korunmalı`
+    : `Pullback: fiyat EMA21/direnç bölgesinden aşağı dönmeli + hacim x${pullbackMinVolume}+ korunmalı`;
+  const triggerCondition = enablePullbackEntry
+    ? `${breakoutCondition} VEYA ${pullbackCondition}`
+    : breakoutCondition;
   if (!triggerOk && side !== "NONE") filters.push(`Giriş tetikleyicisi bekleniyor: ${triggerCondition}`);
 
   const entry = Number(entrySignal.lastClose);
@@ -371,11 +413,35 @@ function analyzeSwingPlan({ candles15m, candles1h, candles4h }) {
   if (!triggerOk) confidence = Math.min(confidence, 72);
 
   const planOk = side !== "NONE" && score >= minScore && confidence >= minConfidence && volumeOk && mtfOk && riskReward >= minRR && triggerOk;
-  if (score < minScore) filters.push(`Skor ${score} < ${minScore} — işlem yok`);
+
+  // v3: Kademeli giriş sistemi. Artık sadece "tam onay" yok.
+  // EARLY = erken aday, PREPARE = hazırlık, CONFIRMED = giriş onayı.
+  const earlyScore = Number(process.env.EARLY_ENTRY_SCORE || 60);
+  const prepareScore = Number(process.env.PREPARE_ENTRY_SCORE || 75);
+  const earlyMinVolume = Number(process.env.EARLY_MIN_VOLUME_RATIO || 0.55);
+  const entryStage = planOk
+    ? "CONFIRMED"
+    : (side !== "NONE" && score >= prepareScore && Number(entrySignal.volumeRatio || 0) >= earlyMinVolume)
+      ? "PREPARE"
+      : (side !== "NONE" && score >= earlyScore && Number(entrySignal.volumeRatio || 0) >= earlyMinVolume)
+        ? "EARLY"
+        : "WAIT";
+  const entryStageLabel = entryStage === "CONFIRMED"
+    ? "🔔 GİRİŞ ONAYLANDI"
+    : entryStage === "PREPARE"
+      ? "👀 HAZIRLIK — TETİK BEKLE"
+      : entryStage === "EARLY"
+        ? "⚡ ERKEN ADAY — RİSKLİ / İZLE"
+        : "⏳ BEKLE";
+
+  if (score < minScore) filters.push(`Skor ${score} < ${minScore} — onaylı giriş yok`);
   if (confidence < minConfidence) filters.push(`Güven ${confidence}% < ${minConfidence}% — işlem yok`);
 
-  const entryLow = round(side === "LONG" ? entry * 0.999 : entry * 0.9995, 4);
-  const entryHigh = round(side === "LONG" ? entry * 1.0005 : entry * 1.001, 4);
+  // Tek fiyat yerine giriş bölgesi: kullanıcıya daha uygulanabilir plan verir.
+  // CONFIRMED olduğunda bölge dar, erken/hazırlıkta bilgi amaçlıdır.
+  const entryZoneWidthPct = entryType === "PULLBACK" ? Number(process.env.PULLBACK_ENTRY_ZONE_PERCENT || 0.22) : Number(process.env.BREAKOUT_ENTRY_ZONE_PERCENT || 0.14);
+  const entryLow = round(entry * (1 - entryZoneWidthPct / 100), 4);
+  const entryHigh = round(entry * (1 + entryZoneWidthPct / 100), 4);
   const stopLossPrice = planPrice(side === "LONG" ? "SHORT" : "LONG", entry, stopPct);
   const tp1Price = planPrice(side, entry, tp1Pct);
   const tp2Price = planPrice(side, entry, tp2Pct);
@@ -396,20 +462,27 @@ function analyzeSwingPlan({ candles15m, candles1h, candles4h }) {
     entryBlocked: !planOk,
     filters,
     reasons: [
+      `Giriş tipi: ${entryType}`,
       `15m giriş yönü: ${side}`,
       `1h teyit: aynı ${same1h} / ters ${opp1h}`,
       `4h teyit: aynı ${same4h} / ters ${opp4h}`,
       ...(entrySignal.reasons || []).slice(0, 4),
     ],
     mtfSummary: { same1h, opp1h, same4h, opp4h, mtfOk },
+    entryStage,
+    entryStageLabel,
     entryTrigger: {
       requireEntryTrigger,
       triggerPrice: round(triggerPrice, 4),
       triggerConfirmed,
+      pullbackConfirmed,
+      entryType,
       condition: triggerCondition,
       candle: "15m",
       minVolumeRatio: minVolume,
-      waitMessage: triggerOk ? "GİRİŞ ONAYLANDI" : "ŞU AN GİRME — TETİK BEKLE",
+      waitMessage: entryStageLabel,
+      entryZoneLow: entryLow,
+      entryZoneHigh: entryHigh,
     },
     plan: {
       targetProfitUsdt: round(targetProfitUsdt, 2),
@@ -436,7 +509,7 @@ function analyzeSwingPlan({ candles15m, candles1h, candles4h }) {
       timeWindow: process.env.SWING_TIME_WINDOW || "2 saat - 2 gün",
     },
     guide: {
-      decision: planOk ? "GİRİŞ ONAYLANDI — EMİR PLANI UYGULA" : "HAZIRLIK — GİRİŞ TETİĞİ BEKLENİYOR",
+      decision: planOk ? `${entryType} GİRİŞ ONAYLANDI — EMİR PLANI UYGULA` : entryStageLabel,
       next: planOk
         ? [
           `${side} için ${entryLow} - ${entryHigh} giriş bölgesi`,
