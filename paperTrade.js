@@ -124,10 +124,9 @@ function improvePaperRisk(trade, currentPrice) {
     }
   };
 
-  if (pnlPercent >= 0.6) setStopByProfit(0, "BREAK_EVEN", "Risk azaltıldı: SL giriş fiyatına çekildi.");
-  if (pnlPercent >= 1.2) setStopByProfit(0.35, "LOCK_035", "Kâr koruma: SL yaklaşık +%0.35 kâra çekildi.");
-  if (pnlPercent >= 2.0) setStopByProfit(0.8, "LOCK_080", "Kâr koruma: SL yaklaşık +%0.80 kâra çekildi.");
-  if (pnlPercent >= 3.0) setStopByProfit(1.4, "TRAILING", "Trailing koruma aktif: SL kârı koruyacak şekilde taşındı.");
+  if (pnlPercent >= Number(process.env.V8_BREAK_EVEN_ROE || 1.5)) setStopByProfit(0, "BREAK_EVEN", "Risk azaltıldı: SL giriş fiyatına çekildi.");
+  if (pnlPercent >= Number(process.env.V8_LOCK_ROE || 2.5)) setStopByProfit(0.35, "LOCK_035", "Kâr koruma: SL yaklaşık +%0.35 kâra çekildi.");
+  if (pnlPercent >= Number(process.env.V8_TRAIL_ROE || 4.0)) setStopByProfit(0.8, "TRAILING", "Trailing koruma aktif: SL kârı koruyacak şekilde taşındı.");
 
   if (newSl !== oldSl) {
     trade.activeStopLossPrice = newSl;

@@ -296,198 +296,144 @@ function planPrice(side, entry, percent) {
 }
 
 function analyzeSwingPlan({ candles15m, candles1h, candles4h }) {
-  const entrySignal = analyzeMarket(candles15m, { timeframe: "15m" });
-  const trend1h = analyzeMarket(candles1h, { timeframe: "1h" });
-  const trend4h = analyzeMarket(candles4h, { timeframe: "4h" });
+  // FALIX V8: hızlı fırsat modu
+  // Amaç: 1h/4h zorunlu onay yüzünden fırsat kaçırmamak.
+  // Giriş kararı 5m/15m kısa trend + EMA + RSI + hacim ile verilir.
+  const entrySignal = analyzeMarket(candles15m, { timeframe: "5m" });
+  const trend1h = candles1h && candles1h.length ? analyzeMarket(candles1h, { timeframe: "1h" }) : null;
+  const trend4h = candles4h && candles4h.length ? analyzeMarket(candles4h, { timeframe: "4h" }) : null;
 
-  let side = entrySignal.side;
-  const filters = [...(entrySignal.filters || [])];
-  if (!side || side === "NONE") filters.push("15m net yön üretmedi");
-
-  const same1h = sameDirectionScore(trend1h, side);
-  const opp1h = oppositeDirectionScore(trend1h, side);
-  const same4h = sameDirectionScore(trend4h, side);
-  const opp4h = oppositeDirectionScore(trend4h, side);
-
-  const minScore = Number(process.env.SWING_MIN_SCORE || 90);
-  const minConfidence = Number(process.env.SWING_MIN_CONFIDENCE || 75);
-  const minVolume = Number(process.env.SWING_MIN_VOLUME_RATIO || 0.90);
-  const minRR = Number(process.env.SWING_MIN_RR || 2);
-  const requireEntryTrigger = process.env.REQUIRE_ENTRY_TRIGGER !== "false";
-  const targetProfitUsdt = Number(process.env.TARGET_PROFIT_USDT || 5);
-  const defaultBalance = Number(process.env.ACCOUNT_BALANCE_USDT || 100);
-  const leverage = Number(process.env.SWING_LEVERAGE || process.env.DEFAULT_LEVERAGE || 5);
-
-  const mtfOk = side !== "NONE" && same1h >= 58 && same1h >= opp1h && same4h >= 52 && opp4h <= same4h + 8;
-  if (!mtfOk) filters.push(`1h/4h yön onayı yetersiz: 1h ${same1h}/${opp1h}, 4h ${same4h}/${opp4h}`);
-
-  const volumeOk = Number(entrySignal.volumeRatio || 0) >= minVolume;
-  if (!volumeOk) filters.push(`Hacim x${entrySignal.volumeRatio} < x${minVolume} — işlem yok`);
-
-  const adxOk = Number(entrySignal.adx || 0) >= Number(process.env.SWING_MIN_ADX || 20) || Number(trend1h.adx || 0) >= Number(process.env.SWING_MIN_ADX || 20);
-  if (!adxOk) filters.push("Trend gücü zayıf — işlem yok");
-
-  const triggerPrice = side === "LONG" ? Number(entrySignal.resistance || entrySignal.lastClose) : Number(entrySignal.support || entrySignal.lastClose);
-  const triggerConfirmed = side === "LONG" ? Boolean(entrySignal.breakoutConfirmed) : Boolean(entrySignal.breakdownConfirmed);
-
-  // v2: Sadece kırılım bekleyen sistem fırsat kaçırıyordu.
-  // Bu yüzden ikinci giriş tipi eklendi: PULLBACK / destekten-dirençten dönüş.
-  // Breakout = daha geç ama daha temiz. Pullback = daha erken, stop daha yakın.
-  const enablePullbackEntry = process.env.ENABLE_PULLBACK_ENTRY !== "false";
-  const ema21 = Number(entrySignal.ema21 || entrySignal.lastClose);
-  const ema9 = Number(entrySignal.ema9 || entrySignal.lastClose);
   const price = Number(entrySignal.lastClose || 0);
+  const ema9 = Number(entrySignal.ema9 || price);
+  const ema21 = Number(entrySignal.ema21 || price);
+  const ema50 = Number(entrySignal.trendEma || price);
   const rsi = Number(entrySignal.rsi || 50);
+  const volumeRatio = Number(entrySignal.volumeRatio || 0);
   const momentum = Number(entrySignal.priceMomentum || 0);
-  const nearEma21Pct = price && ema21 ? Math.abs((price - ema21) / price) * 100 : 99;
-  const nearLevelPct = side === "LONG"
-    ? (price && entrySignal.support ? Math.abs((price - Number(entrySignal.support)) / price) * 100 : 99)
-    : (price && entrySignal.resistance ? Math.abs((Number(entrySignal.resistance) - price) / price) * 100 : 99);
-  const pullbackMaxDistance = Number(process.env.PULLBACK_MAX_DISTANCE_PERCENT || 0.85);
-  const pullbackMinVolume = Number(process.env.PULLBACK_MIN_VOLUME_RATIO || Math.min(minVolume, 0.75));
-  const pullbackLong = side === "LONG"
-    && enablePullbackEntry
-    && Number(entrySignal.volumeRatio || 0) >= pullbackMinVolume
-    && ema9 >= ema21
-    && price >= ema21 * 0.998
-    && (nearEma21Pct <= pullbackMaxDistance || nearLevelPct <= pullbackMaxDistance)
-    && rsi >= 38 && rsi <= 62
-    && momentum >= -0.18;
-  const pullbackShort = side === "SHORT"
-    && enablePullbackEntry
-    && Number(entrySignal.volumeRatio || 0) >= pullbackMinVolume
-    && ema9 <= ema21
-    && price <= ema21 * 1.002
-    && (nearEma21Pct <= pullbackMaxDistance || nearLevelPct <= pullbackMaxDistance)
-    && rsi >= 38 && rsi <= 62
-    && momentum <= 0.18;
-  const pullbackConfirmed = side === "LONG" ? pullbackLong : side === "SHORT" ? pullbackShort : false;
-  const entryType = triggerConfirmed ? "BREAKOUT" : pullbackConfirmed ? "PULLBACK" : "WAIT_TRIGGER";
-  const triggerOk = !requireEntryTrigger || triggerConfirmed || pullbackConfirmed;
+  const adx = Number(entrySignal.adx || 0);
 
-  const breakoutCondition = side === "LONG"
-    ? `Breakout: 15m mum ${round(triggerPrice, 4)} üstünde kapanmalı + hacim x${minVolume}+ olmalı`
-    : `Breakout: 15m mum ${round(triggerPrice, 4)} altında kapanmalı + hacim x${minVolume}+ olmalı`;
-  const pullbackCondition = side === "LONG"
-    ? `Pullback: fiyat EMA21/destek bölgesinden yukarı dönmeli + hacim x${pullbackMinVolume}+ korunmalı`
-    : `Pullback: fiyat EMA21/direnç bölgesinden aşağı dönmeli + hacim x${pullbackMinVolume}+ korunmalı`;
-  const triggerCondition = enablePullbackEntry
-    ? `${breakoutCondition} VEYA ${pullbackCondition}`
-    : breakoutCondition;
-  if (!triggerOk && side !== "NONE") filters.push(`Giriş tetikleyicisi bekleniyor: ${triggerCondition}`);
+  const minVol = Number(process.env.V8_MIN_VOLUME_RATIO || process.env.MIN_ENTRY_VOLUME_RATIO || 0.45);
+  const minScore = Number(process.env.V8_MIN_SCORE || 52);
+  const rsiLongMin = Number(process.env.V8_RSI_LONG_MIN || 50);
+  const rsiShortMax = Number(process.env.V8_RSI_SHORT_MAX || 50);
+  const requireTrendEma = process.env.V8_REQUIRE_EMA50 === "true";
 
-  const entry = Number(entrySignal.lastClose);
-  const atrPct = Math.max(Number(entrySignal.atrPercent || 0.35), 0.35);
-  const stopPct = clamp(atrPct * Number(process.env.SWING_STOP_ATR_MULT || 1.25), 0.45, 1.35);
-  const tp1Pct = stopPct * 1.15;
-  const tp2Pct = stopPct * 2.05;
-  const tp3Pct = stopPct * 3.0;
-  const weightedTpPct = (tp1Pct * 0.30) + (tp2Pct * 0.40) + (tp3Pct * 0.30);
-  const riskReward = weightedTpPct / stopPct;
-  if (riskReward < minRR) filters.push(`Risk/ödül 1:${round(riskReward, 2)} < 1:${minRR} — işlem yok`);
+  const longTrend = ema9 > ema21 && (!requireTrendEma || ema21 >= ema50 * 0.995);
+  const shortTrend = ema9 < ema21 && (!requireTrendEma || ema21 <= ema50 * 1.005);
+  const longMomentum = rsi >= rsiLongMin && momentum >= Number(process.env.V8_MIN_MOMENTUM || -0.20);
+  const shortMomentum = rsi <= rsiShortMax && momentum <= Number(process.env.V8_MAX_MOMENTUM || 0.20);
+  const volumeOk = volumeRatio >= minVol;
 
-  let score = Math.round(
-    (Number(entrySignal.score || 0) * 0.45) +
-    (same1h * 0.30) +
-    (same4h * 0.25)
-  );
-  if (!mtfOk) score = Math.min(score, 72);
-  if (!volumeOk) score = Math.min(score, 68);
-  if (!adxOk) score = Math.min(score, 70);
-  score = clamp(score, 0, 100);
+  let longScore = 0;
+  let shortScore = 0;
+  const longReasons = [];
+  const shortReasons = [];
+  const filters = [];
 
-  let confidence = calculateConfidence({
-    score,
-    entryApproved: true,
-    volumeRatio: entrySignal.volumeRatio,
-    marketRegime: entrySignal.marketRegime,
-    mtfOk,
-    breakoutConfirmed: entrySignal.breakoutConfirmed,
-    breakdownConfirmed: entrySignal.breakdownConfirmed,
-    side,
-  });
-  if (!mtfOk) confidence = Math.min(confidence, 65);
-  if (!volumeOk) confidence = Math.min(confidence, 60);
+  if (ema9 > ema21) { longScore += 28; longReasons.push("EMA9 EMA21 üstünde"); }
+  if (ema21 >= ema50 * 0.995) { longScore += 18; longReasons.push("EMA21 ana trend üstünde / yakın"); }
+  if (rsi >= rsiLongMin && rsi <= 72) { longScore += 18; longReasons.push(`RSI long için uygun: ${round(rsi, 2)}`); }
+  if (momentum >= -0.20) { longScore += 10; longReasons.push("Momentum long tarafını bozmadı"); }
+  if (volumeOk) { longScore += 16; longReasons.push(`Hacim yeterli: x${round(volumeRatio, 2)}`); }
+  if (adx >= 18) { longScore += 8; longReasons.push(`Trend gücü yeterli: ADX ${round(adx, 2)}`); }
 
-  if (!triggerOk) confidence = Math.min(confidence, 72);
+  if (ema9 < ema21) { shortScore += 28; shortReasons.push("EMA9 EMA21 altında"); }
+  if (ema21 <= ema50 * 1.005) { shortScore += 18; shortReasons.push("EMA21 ana trend altında / yakın"); }
+  if (rsi <= rsiShortMax && rsi >= 28) { shortScore += 18; shortReasons.push(`RSI short için uygun: ${round(rsi, 2)}`); }
+  if (momentum <= 0.20) { shortScore += 10; shortReasons.push("Momentum short tarafını bozmadı"); }
+  if (volumeOk) { shortScore += 16; shortReasons.push(`Hacim yeterli: x${round(volumeRatio, 2)}`); }
+  if (adx >= 18) { shortScore += 8; shortReasons.push(`Trend gücü yeterli: ADX ${round(adx, 2)}`); }
 
-  const planOk = side !== "NONE" && score >= minScore && confidence >= minConfidence && volumeOk && mtfOk && riskReward >= minRR && triggerOk;
+  longScore = clamp(Math.round(longScore), 0, 100);
+  shortScore = clamp(Math.round(shortScore), 0, 100);
 
-  // v3: Kademeli giriş sistemi. Artık sadece "tam onay" yok.
-  // EARLY = erken aday, PREPARE = hazırlık, CONFIRMED = giriş onayı.
-  const earlyScore = Number(process.env.EARLY_ENTRY_SCORE || 60);
-  const prepareScore = Number(process.env.PREPARE_ENTRY_SCORE || 75);
-  const earlyMinVolume = Number(process.env.EARLY_MIN_VOLUME_RATIO || 0.55);
-  const entryStage = planOk
-    ? "CONFIRMED"
-    : (side !== "NONE" && score >= prepareScore && Number(entrySignal.volumeRatio || 0) >= earlyMinVolume)
-      ? "PREPARE"
-      : (side !== "NONE" && score >= earlyScore && Number(entrySignal.volumeRatio || 0) >= earlyMinVolume)
-        ? "EARLY"
-        : "WAIT";
-  const entryStageLabel = entryStage === "CONFIRMED"
-    ? "🟢 AKSİYON: İŞLEM AÇ"
-    : entryStage === "PREPARE"
-      ? "🟡 AKSİYON: HAZIR OL"
-      : entryStage === "EARLY"
-        ? "👀 AKSİYON: RADAR"
-        : "⏳ AKSİYON: BEKLE";
+  let side = "NONE";
+  let score = 0;
+  let reasons = ["Net fırsat yok"];
 
-  if (score < minScore) filters.push(`Skor ${score} < ${minScore} — onaylı giriş yok`);
-  if (confidence < minConfidence) filters.push(`Güven ${confidence}% < ${minConfidence}% — işlem yok`);
+  if (longScore >= shortScore && longTrend && longMomentum) {
+    side = "LONG";
+    score = longScore;
+    reasons = longReasons;
+  } else if (shortScore > longScore && shortTrend && shortMomentum) {
+    side = "SHORT";
+    score = shortScore;
+    reasons = shortReasons;
+  } else {
+    score = Math.max(longScore, shortScore);
+  }
 
-  // Tek fiyat yerine giriş bölgesi: kullanıcıya daha uygulanabilir plan verir.
-  // CONFIRMED olduğunda bölge dar, erken/hazırlıkta bilgi amaçlıdır.
-  const entryZoneWidthPct = entryType === "PULLBACK" ? Number(process.env.PULLBACK_ENTRY_ZONE_PERCENT || 0.22) : Number(process.env.BREAKOUT_ENTRY_ZONE_PERCENT || 0.14);
-  const entryLow = round(entry * (1 - entryZoneWidthPct / 100), 4);
-  const entryHigh = round(entry * (1 + entryZoneWidthPct / 100), 4);
-  const stopLossPrice = planPrice(side === "LONG" ? "SHORT" : "LONG", entry, stopPct);
-  const tp1Price = planPrice(side, entry, tp1Pct);
-  const tp2Price = planPrice(side, entry, tp2Pct);
-  const tp3Price = planPrice(side, entry, tp3Pct);
+  if (!volumeOk) filters.push(`Hacim x${round(volumeRatio, 2)} < x${minVol} — işlem yok`);
+  if (side === "NONE") filters.push("EMA/RSI/momentum aynı yönde değil — işlem yok");
+  if (score < minScore) filters.push(`Skor ${score} < ${minScore} — işlem yok`);
 
-  const requiredNotional = targetProfitUsdt / (weightedTpPct / 100);
-  const estimatedMargin = requiredNotional / leverage;
-  const estimatedRiskUsdt = requiredNotional * (stopPct / 100);
+  const entryApproved = side !== "NONE" && volumeOk && score >= minScore;
+  const confidence = clamp(score + (volumeRatio >= 1 ? 5 : 0), 0, 100);
+
+  const leverage = Number(process.env.V8_LEVERAGE || process.env.SWING_LEVERAGE || process.env.DEFAULT_LEVERAGE || 10);
+  const stopPct = Number(process.env.V8_STOP_PERCENT || 0.45);
+  const tp1Pct = Number(process.env.V8_TP1_PERCENT || 0.35);
+  const tp2Pct = Number(process.env.V8_TP2_PERCENT || 0.65);
+  const tp3Pct = Number(process.env.V8_TP3_PERCENT || 0.95);
+  const rr = round(((tp1Pct * 0.50) + (tp2Pct * 0.30) + (tp3Pct * 0.20)) / stopPct, 2);
+
+  const zonePct = Number(process.env.V8_ENTRY_ZONE_PERCENT || 0.12);
+  const entryLow = round(price * (1 - zonePct / 100), 4);
+  const entryHigh = round(price * (1 + zonePct / 100), 4);
+
+  const stopLossPrice = planPrice(side === "LONG" ? "SHORT" : "LONG", price, stopPct);
+  const tp1Price = planPrice(side, price, tp1Pct);
+  const tp2Price = planPrice(side, price, tp2Pct);
+  const tp3Price = planPrice(side, price, tp3Pct);
+
+  const action = entryApproved ? `ENTRY_${side}` : "WAIT";
+  const entryStage = entryApproved ? "CONFIRMED" : "WAIT";
 
   return {
     ...entrySignal,
-    mode: "SWING_PLAN",
-    action: planOk ? `ENTRY_${side}` : (entryStage === "PREPARE" ? `READY_${side}` : entryStage === "EARLY" ? `RADAR_${side}` : "WAIT"),
-    side: planOk ? side : (side || "NONE"),
+    mode: "V8_FAST_OPPORTUNITY",
+    action,
+    side,
     score,
+    rawScore: score,
     confidence,
-    entryApproved: planOk,
-    entryBlocked: !planOk,
+    entryApproved,
+    entryBlocked: !entryApproved,
     filters,
-    reasons: [
-      `Giriş tipi: ${entryType}`,
-      `15m giriş yönü: ${side}`,
-      `1h teyit: aynı ${same1h} / ters ${opp1h}`,
-      `4h teyit: aynı ${same4h} / ters ${opp4h}`,
-      ...(entrySignal.reasons || []).slice(0, 4),
-    ],
-    mtfSummary: { same1h, opp1h, same4h, opp4h, mtfOk },
+    reasons,
+    longScore,
+    shortScore,
+    marketRegime: {
+      ...(entrySignal.marketRegime || {}),
+      label: entryApproved ? (side === "LONG" ? "Hızlı long fırsatı" : "Hızlı short fırsatı") : (entrySignal.marketRegime?.label || "Bekle"),
+      allowEntry: entryApproved,
+    },
+    mtfSummary: trend1h && trend4h ? {
+      same1h: sameDirectionScore(trend1h, side),
+      opp1h: oppositeDirectionScore(trend1h, side),
+      same4h: sameDirectionScore(trend4h, side),
+      opp4h: oppositeDirectionScore(trend4h, side),
+      mtfOk: true,
+      note: "V8'de 1h/4h sadece bilgi amaçlıdır, giriş engellemez."
+    } : { mtfOk: true, note: "V8 hızlı mod" },
     entryStage,
-    entryStageLabel,
+    entryStageLabel: entryApproved ? "🟢 AKSİYON: İŞLEM AÇ" : "⏳ AKSİYON: BEKLE",
     entryTrigger: {
-      requireEntryTrigger,
-      triggerPrice: round(triggerPrice, 4),
-      triggerConfirmed,
-      pullbackConfirmed,
-      entryType,
-      condition: triggerCondition,
-      candle: "15m",
-      minVolumeRatio: minVolume,
-      waitMessage: entryStageLabel,
+      requireEntryTrigger: false,
+      triggerConfirmed: entryApproved,
+      pullbackConfirmed: false,
+      entryType: "V8_FAST",
+      condition: entryApproved ? "EMA + RSI + hacim aynı yönde; fırsat aktif." : filters.join(" | "),
+      candle: "5m",
+      minVolumeRatio: minVol,
       entryZoneLow: entryLow,
       entryZoneHigh: entryHigh,
     },
     plan: {
-      targetProfitUsdt: round(targetProfitUsdt, 2),
-      accountBalanceUsdt: round(defaultBalance, 2),
+      targetProfitUsdt: Number(process.env.TARGET_PROFIT_USDT || 5),
+      accountBalanceUsdt: Number(process.env.ACCOUNT_BALANCE_USDT || 100),
       leverage,
-      entry: round(entry, 4),
+      entry: round(price, 4),
       entryLow,
       entryHigh,
       stopLossPrice,
@@ -498,18 +444,18 @@ function analyzeSwingPlan({ candles15m, candles1h, candles4h }) {
       tp1Percent: round(tp1Pct, 2),
       tp2Percent: round(tp2Pct, 2),
       tp3Percent: round(tp3Pct, 2),
-      tp1ClosePercent: 30,
-      tp2ClosePercent: 40,
-      tp3ClosePercent: 30,
-      riskReward: round(riskReward, 2),
-      estimatedMarginUsdt: round(estimatedMargin, 2),
-      estimatedRiskUsdt: round(estimatedRiskUsdt, 2),
-      requiredNotionalUsdt: round(requiredNotional, 2),
-      timeWindow: process.env.SWING_TIME_WINDOW || "2 saat - 2 gün",
+      tp1ClosePercent: 50,
+      tp2ClosePercent: 30,
+      tp3ClosePercent: 20,
+      riskReward: rr,
+      estimatedMarginUsdt: Number(process.env.V8_ESTIMATED_MARGIN_USDT || 35),
+      estimatedRiskUsdt: round(Number(process.env.V8_ESTIMATED_MARGIN_USDT || 35) * leverage * (stopPct / 100), 2),
+      requiredNotionalUsdt: round(Number(process.env.V8_ESTIMATED_MARGIN_USDT || 35) * leverage, 2),
+      timeWindow: process.env.V8_TIME_WINDOW || "5-45 dk",
     },
     guide: {
-      decision: planOk ? `🟢 AKSİYON: İŞLEM AÇ — ${entryType}` : entryStageLabel,
-      next: planOk
+      decision: entryApproved ? `🟢 AKSİYON: İŞLEM AÇ (${side})` : "⏳ AKSİYON: BEKLE",
+      next: entryApproved
         ? [
           `${side} için ${entryLow} - ${entryHigh} giriş bölgesi`,
           `Stop: ${stopLossPrice}`,

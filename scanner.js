@@ -33,7 +33,7 @@ function getSignalLevel(score) {
 function hasRecentEntryLock(symbol) {
   const lock = entryLocks[symbol];
   if (!lock) return false;
-  const cooldownMs = Number(process.env.ENTRY_SIGNAL_LOCK_MINUTES || 30) * 60 * 1000;
+  const cooldownMs = Number(process.env.ENTRY_SIGNAL_LOCK_MINUTES || 5) * 60 * 1000;
   return Date.now() - lock.at < cooldownMs;
 }
 
@@ -233,7 +233,7 @@ Açık pozisyon varsa bot takip eder. Aksiyon dili: BEKLE / HAZIR OL / İŞLEM A
 
 async function scanSymbol(symbol) {
   const [candles15m, candles1h, candles4h] = await Promise.all([
-    getKlines(symbol, "15m", 220),
+    getKlines(symbol, "5m", 220),
     getKlines(symbol, "1h", 220),
     getKlines(symbol, "4h", 220),
   ]);
@@ -267,7 +267,7 @@ async function scanSymbol(symbol) {
 
   await sendUserTrackedReports(symbol, signal, currentPrice);
 
-  const signalThreshold = Number(process.env.SWING_MIN_SCORE || 90);
+  const signalThreshold = Number(process.env.SWING_MIN_SCORE || process.env.V8_MIN_SCORE || 52);
   if (
     signal.score < signalThreshold ||
     !signal.side ||
