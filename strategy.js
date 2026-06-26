@@ -8,13 +8,13 @@ function round(n, d = 2) { return Number(Number(n || 0).toFixed(d)); }
 function scoreToAction(side, score, entryApproved) {
   if (!side || side === "NONE" || score < 55) return { action: "WAIT", side: "NONE" };
   if (!entryApproved) {
-    if (score >= 75) return { action: `WATCH_${side}`, side };
-    if (score >= 55) return { action: `OBSERVE_${side}`, side };
+    if (score >= 75) return { action: `READY_${side}`, side };
+    if (score >= 55) return { action: `RADAR_${side}`, side };
     return { action: "WAIT", side: "NONE" };
   }
   if (score >= 94) return { action: `PRO_${side}`, side };
   if (score >= 88) return { action: `STRONG_${side}`, side };
-  if (score >= 78) return { action: `WATCH_${side}`, side };
+  if (score >= 78) return { action: `ENTRY_${side}`, side };
   return { action: "WAIT", side: "NONE" };
 }
 
