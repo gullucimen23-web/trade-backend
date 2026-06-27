@@ -1,7 +1,7 @@
 require("dotenv").config();
 
 const express = require("express");
-const { sendTelegram, answerCallbackQuery, setTelegramWebhook } = require("./telegram");
+const { sendTelegram, sendTelegramWithButtons, answerCallbackQuery, setTelegramWebhook } = require("./telegram");
 const { askOpenAIWithGuard, getOpenAIStats } = require("./openaiGuard");
 const { getKlines, getPrice } = require("./binance");
 const { analyzeMarket, analyzeMultiTimeframe } = require("./strategy");
@@ -66,7 +66,7 @@ app.post("/telegram-webhook", async (req, res) => {
 
         await answerCallbackQuery(callback.id, "Takibe alındı. Raporlar özelden gelecek.");
 
-        await sendTelegram(
+        await sendTelegramWithButtons(
           `
 ✅ <b>İşlem Canlı Takibe Alındı</b>
 
@@ -76,10 +76,11 @@ Giriş: <b>${tracked.entry}</b>
 Kaldıraç: <b>${tracked.leverage}x</b>
 
 Bot artık bu açık pozisyonu izleyecek.
-Karar dili: <b>DEVAM / KÂRI KORU / ÇIKIŞA HAZIRLAN / ŞİMDİ ÇIK / TERS YÖNE HAZIRLAN</b>
+Aksiyon dili: <b>POZİSYONU KORU / ÇIK</b>
 
-Not: Özel mesajların gelmesi için botu özelden /start yapmış olman gerekebilir.
+İşlemden manuel çıktıysan aşağıdaki butona bas; bot bu işlemi takip etmeyi bırakır.
 `,
+          [[{ text: "🛑 İşlemden Çıktım / Takibi Bırak", callback_data: `STOPTRACK:${tracked.symbol}:${tracked.id}` }]],
           tracked.userId
         );
 
@@ -98,6 +99,16 @@ Not: Özel mesajların gelmesi için botu özelden /start yapmış olman gerekeb
           callback.id,
           stopped ? "Takip durduruldu." : "Takip bulunamadı."
         );
+
+        if (stopped) {
+          await sendTelegram(
+            `✅ <b>Takip Sonlandırıldı</b>
+
+${stopped.symbol} ${stopped.side} takibi bırakıldı.
+Yeni sinyal bekleniyor.`,
+            String(user.id)
+          );
+        }
 
         return res.json({ ok: true });
       }

@@ -24,7 +24,7 @@ let lastWatchAlerts = {};
 let entryLocks = {};
 
 function getSignalLevel(score) {
-  if (score >= 85) return "🟢 İŞLEM AÇ ADAYI";
+  if (score >= 85) return "🟢 İŞLEM AÇ";
   if (score >= 75) return "🟡 HAZIR OL";
   if (score >= 55) return "👀 RADAR";
   return "⏳ BEKLE";
@@ -65,7 +65,9 @@ async function sendUserTrackedReports(symbol, signal, currentPrice) {
       trade.lastUrgentStatus = advice.status;
       trade.lastUrgentAt = new Date().toISOString();
       saveTrackedTrade(trade);
-      await sendTelegram(formatTradeReport(trade, signal, currentPrice, advice, pnlPercent), trade.userId);
+      await sendTelegramWithButtons(formatTradeReport(trade, signal, currentPrice, advice, pnlPercent), [
+        [{ text: "🛑 İşlemden Çıktım / Takibi Bırak", callback_data: `STOPTRACK:${trade.symbol}:${trade.id}` }],
+      ], trade.userId);
       if (["EXIT_NOW", "PROFIT_EXIT"].includes(advice.status) && process.env.AUTO_CLOSE_ON_EXIT_SIGNAL === "true") {
         closeTrackedTrade(trade, advice.status, currentPrice, pnlPercent);
       }
@@ -74,7 +76,9 @@ async function sendUserTrackedReports(symbol, signal, currentPrice) {
 
     if (now - lastAt >= intervalMs) {
       lastFollowReportAt[trade.id] = now;
-      await sendTelegram(formatTradeReport(trade, signal, currentPrice, advice, pnlPercent), trade.userId);
+      await sendTelegramWithButtons(formatTradeReport(trade, signal, currentPrice, advice, pnlPercent), [
+        [{ text: "🛑 İşlemden Çıktım / Takibi Bırak", callback_data: `STOPTRACK:${trade.symbol}:${trade.id}` }],
+      ], trade.userId);
     }
   }
 }
@@ -271,8 +275,7 @@ async function scanSymbol(symbol) {
   if (
     signal.score < signalThreshold ||
     !signal.side ||
-    signal.side === "NONE" ||
-    signal.entryApproved === false
+    signal.side === "NONE"
   ) {
     if (shouldSendWatchAlert(symbol, signal)) {
       await sendTelegram(buildWatchMessage(symbol, signal));
@@ -320,8 +323,8 @@ TP1/TP2/TP3: <b>${paperTrade.tp1Price}</b> / <b>${paperTrade.tp2Price}</b> / <b>
   setEntryLock(symbol, signal.side);
 
   await sendTelegramWithButtons(buildSignalMessage(symbol, signal, tradePlan), [
-    [{ text: "📊 Açtım / Pozisyonu Takibe Al", callback_data: `TRACK:${symbol}:${approval.id}` }],
-    [{ text: "❌ Açmadım", callback_data: `IGNORE:${symbol}:${approval.id}` }],
+    [{ text: "✅ İşleme Girdim / Takibe Al", callback_data: `TRACK:${symbol}:${approval.id}` }],
+    [{ text: "❌ Girmedim", callback_data: `IGNORE:${symbol}:${approval.id}` }],
   ]);
 
   console.log("✅ Sinyal adayı gönderildi:", symbol, signal.side, signal.score);
