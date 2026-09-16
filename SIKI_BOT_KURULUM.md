@@ -29,6 +29,7 @@ En az 7 gün paper sonuçlarını incele. Kâr garantisi yoktur; pump yakalama f
 - Mevcut marjin ve kaldıraçla minimum kontratı alınamayan coinleri emirden önce eleme; başarısız coini 30 dakika yeniden denememe.
 - Paper, testnet ve gerçek MEXC günlük işlem/zarar sayaçlarını tamamen ayrı tutma.
 - Hacim hesabında yalnızca kapanmış mumları kullanma; WAIT sinyallerini onay listesine almama ve emir öncesi güncel fiyat kayma kontrolü.
+- Stop fiyatını her kontratın `priceUnit` adımına göre yönlü yuvarlama; varsayılan olarak girişe yalnızca sert stop ekleyip TP1/TP2/trailing kâr yönetimini pozisyon yöneticisine bırakma.
 
 ## Canlıya geçmeden önce
 

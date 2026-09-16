@@ -166,6 +166,28 @@ function floorToStep(value, step) {
   return Number(result.toFixed(precision));
 }
 
+function ceilToStep(value, step) {
+  const stepText = String(step);
+  const precision = stepText.includes(".") ? stepText.split(".")[1].length : 0;
+  const result = Math.ceil((Number(value) - Number.EPSILON) / Number(step)) * Number(step);
+  return Number(result.toFixed(precision));
+}
+
+function normalizeProtectionPrices({ side, currentPrice, stopLossPrice, takeProfitPrice, priceUnit }) {
+  const tick = Number(priceUnit);
+  if (!Number.isFinite(tick) || tick <= 0) throw new Error("MEXC kontrat priceUnit geçersiz");
+  const current = Number(currentPrice);
+  const stop = side === "LONG" ? floorToStep(stopLossPrice, tick) : ceilToStep(stopLossPrice, tick);
+  const take = side === "LONG" ? ceilToStep(takeProfitPrice, tick) : floorToStep(takeProfitPrice, tick);
+  const valid = side === "LONG"
+    ? stop < current && take > current
+    : stop > current && take < current;
+  if (!valid) {
+    throw new Error(`MEXC koruma fiyatları yönle uyumsuz: fiyat=${current}, stop=${stop}, tp=${take}`);
+  }
+  return { stopLossPrice: stop, takeProfitPrice: take };
+}
+
 function calculateTieredMargin(account) {
   const threshold = Math.max(1, Number(process.env.MEXC_TIER_THRESHOLD_USDT || 50));
   const smallMargin = Math.max(1, Number(process.env.MEXC_SMALL_MARGIN_USDT || 10));
@@ -201,6 +223,18 @@ async function openLiveTrade({ symbol, side, currentPrice, stopLossPrice, takePr
     throw new Error(`${mexcSymbol} kontrat miktarı sınır dışında: ${vol}`);
   }
 
+  const protection = normalizeProtectionPrices({
+    side,
+    currentPrice,
+    stopLossPrice,
+    takeProfitPrice,
+    priceUnit: contract.priceUnit,
+  });
+  const triggerType = contract.stopOnlyFair === true
+    ? 2
+    : Math.min(3, Math.max(1, Number(process.env.MEXC_TRIGGER_PRICE_TYPE || 1)));
+  const attachTp3 = process.env.MEXC_ATTACH_TP3 === "true";
+
   const result = await privatePost("/api/v1/private/order/create", {
     symbol: mexcSymbol,
     price: 0,
@@ -210,14 +244,27 @@ async function openLiveTrade({ symbol, side, currentPrice, stopLossPrice, takePr
     type: 5,
     openType: Number(process.env.MEXC_OPEN_TYPE || 1),
     positionMode: Number(process.env.MEXC_POSITION_MODE || 1),
-    stopLossPrice: Number(stopLossPrice),
-    takeProfitPrice: Number(takeProfitPrice),
-    lossTrend: 2,
-    profitTrend: 2,
+    stopLossPrice: protection.stopLossPrice,
+    takeProfitPrice: attachTp3 ? protection.takeProfitPrice : undefined,
+    lossTrend: triggerType,
+    profitTrend: attachTp3 ? triggerType : undefined,
     externalOid: `falix_${Date.now()}`,
   });
 
-  return { result, symbol: mexcSymbol, side, vol, leverage, marginUsdt, availableUsdt: account.available, equityUsdt: account.equity, reserveUsdt: allocation.reserveUsdt, live: true };
+  return {
+    result,
+    symbol: mexcSymbol,
+    side,
+    vol,
+    leverage,
+    marginUsdt,
+    availableUsdt: account.available,
+    equityUsdt: account.equity,
+    reserveUsdt: allocation.reserveUsdt,
+    stopLossPrice: protection.stopLossPrice,
+    takeProfitPrice: attachTp3 ? protection.takeProfitPrice : null,
+    live: true,
+  };
 }
 
 async function closeLivePosition(symbol) {
@@ -283,6 +330,7 @@ module.exports = {
   BASE_URL,
   LIVE_CONFIRMATION,
   normalizeSymbol,
+  normalizeProtectionPrices,
   calculateTieredMargin,
   syncTime,
   getAssets,
