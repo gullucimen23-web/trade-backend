@@ -4,14 +4,17 @@ const { askOpenAIWithGuard } = require("./openaiGuard");
 const { sendTelegram, sendTelegramWithButtons } = require("./telegram");
 const { buildTradePlan } = require("./risk");
 const { updatePaperTrades, createPaperTrade } = require("./paperTrade");
-const { canOpenTrade } = require("./riskGuard");
+const { canOpenTrade, registerTradeOpen } = require("./riskGuard");
 const { createApproval } = require("./approvalStore");
 const { isBotActive } = require("./botState");
 const { getActiveTrackedTradesBySymbol, closeTrackedTrade, saveTrackedTrade } = require("./trackStore");
 const { calculatePnlPercent, getPositionAdvice, formatTradeReport } = require("./positionAdvisor");
 const { buildOpportunityList, formatOpportunityTable } = require("./opportunityEngine");
 const { openTestnetTrade } = require("./binanceFuturesTestnet");
-const { openLiveTrade: openMexcLiveTrade } = require("./mexcFutures");
+const { openLiveTrade: openMexcLiveTrade, getOpenPositions: getMexcOpenPositions, getUsdtAccountState } = require("./mexcFutures");
+const { getTradingUniverse } = require("./mexcUniverse");
+const { evaluateLiveCandidate } = require("./liveGate");
+const { registerManagedPosition, getRotationBlockedSymbols } = require("./mexcPositionManager");
 
 const SYMBOLS = (process.env.SYMBOLS || "BTCUSDT,ETHUSDT,SOLUSDT")
   .split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
@@ -24,6 +27,28 @@ let latestSignals = {};
 let scanRunning = false;
 let lastWatchAlerts = {};
 let entryLocks = {};
+let currentScanSymbols = [...SYMBOLS];
+let currentMarketMeta = {};
+let liveExecutionRunning = false;
+
+async function getScanUniverse() {
+  if (process.env.AUTO_SYMBOL_UNIVERSE !== "true" || process.env.MARKET_DATA_SOURCE !== "MEXC") {
+    currentScanSymbols = [...SYMBOLS];
+    currentMarketMeta = {};
+    return currentScanSymbols;
+  }
+  try {
+    const universe = await getTradingUniverse();
+    currentScanSymbols = universe.symbols;
+    currentMarketMeta = universe.meta;
+    return currentScanSymbols;
+  } catch (err) {
+    console.error("MEXC dinamik coin listesi alınamadı, sabit liste kullanılacak:", err.message);
+    currentScanSymbols = [...SYMBOLS];
+    currentMarketMeta = {};
+    return currentScanSymbols;
+  }
+}
 
 function getSignalLevel(score) {
   if (score >= 85) return "🟢 İŞLEM AÇ";
@@ -214,7 +239,7 @@ async function sendMarketSummaryIfNeeded() {
 
   if (now - lastMarketSummaryAt >= intervalMs) {
     lastMarketSummaryAt = now;
-    const rows = SYMBOLS.map((symbol) => {
+    const rows = currentScanSymbols.slice(0, 12).map((symbol) => {
       const signal = latestSignals[symbol];
       if (!signal) return `${symbol}: veri bekleniyor`;
       const direction = signal.side && signal.side !== "NONE" ? signal.side : "BEKLE";
@@ -286,23 +311,23 @@ async function scanSymbol(symbol) {
     if (signal.entryBlocked) {
       console.log(`⏳ ${symbol} izleniyor ama giriş yok: ${signal.filters?.join(" | ")}`);
     }
-    return;
+    return null;
   }
 
   const signalKey = `${symbol}_${signal.side}_${Math.round(signal.lastClose)}_${Math.floor(signal.score / 5)}`;
-  if (lastSignals[symbol] === signalKey) return;
-  lastSignals[symbol] = signalKey;
+  const isNewSignal = lastSignals[symbol] !== signalKey;
+  if (isNewSignal) lastSignals[symbol] = signalKey;
 
   const riskCheck = canOpenTrade();
   if (!riskCheck.allowed) {
     console.log(`⛔ İşlem açılmadı: ${riskCheck.reason}`);
-    return;
+    return null;
   }
 
   const tradePlan = buildTradePlan(symbol, signal);
   const approval = createApproval(symbol, signal, tradePlan);
 
-  if (process.env.AUTO_PAPER_TRADING !== "false") {
+  if (isNewSignal && process.env.AUTO_PAPER_TRADING !== "false") {
     const paperTrade = await createPaperTrade(symbol, signal, tradePlan, { source: "AUTO_SIGNAL" });
     if (paperTrade) {
       console.log("🧪 Auto paper trade açıldı:", paperTrade.id, symbol, signal.side);
@@ -317,30 +342,7 @@ TP1/TP2/TP3: <b>${paperTrade.tp1Price}</b> / <b>${paperTrade.tp2Price}</b> / <b>
   }
 
   if (
-    process.env.EXECUTION_EXCHANGE === "MEXC" &&
-    process.env.MEXC_FUTURES_ENABLED === "true" &&
-    process.env.MEXC_LIVE_TRADING_ENABLED === "true" &&
-    signal.entryApproved === true &&
-    signal.entryBlocked !== true &&
-    Number(signal.score || 0) >= Number(process.env.MEXC_AUTO_MIN_SCORE || 90)
-  ) {
-    try {
-      const liveOrder = await openMexcLiveTrade({
-        symbol,
-        side: signal.side,
-        currentPrice,
-        stopLossPrice: tradePlan.stopLossPrice,
-        takeProfitPrice: tradePlan.tp3Price || tradePlan.tp2Price || tradePlan.tp1Price,
-      });
-      registerTradeOpen();
-      await sendTelegram(`🔴 <b>MEXC GERÇEK EMİR AÇILDI</b>\n${liveOrder.symbol} ${signal.side}\nKontrat: <b>${liveOrder.vol}</b>\nKaldıraç: <b>${liveOrder.leverage}x</b>\nMarj: <b>${liveOrder.marginUsdt} USDT</b>`);
-    } catch (err) {
-      console.error(`${symbol} MEXC canlı emir hatası:`, err.message);
-      await sendTelegram(`⚠️ <b>MEXC canlı emir açılamadı</b>\n${symbol}\n${err.message}`);
-    }
-  }
-
-  if (
+    isNewSignal &&
     process.env.EXECUTION_EXCHANGE !== "MEXC" &&
     process.env.FUTURES_TESTNET_ENABLED === "true" &&
     process.env.AUTO_TESTNET_TRADING === "true" &&
@@ -364,20 +366,72 @@ TP1/TP2/TP3: <b>${paperTrade.tp1Price}</b> / <b>${paperTrade.tp2Price}</b> / <b>
     }
   }
 
-  if (process.env.OPENAI_SIGNAL_REVIEW === "true") {
+  if (isNewSignal && process.env.OPENAI_SIGNAL_REVIEW === "true") {
     askOpenAIWithGuard({ symbol, signal, tradePlan }).catch((err) => {
       console.error("OpenAI arka plan hatası:", err.message);
     });
   }
 
-  setEntryLock(symbol, signal.side);
+  if (isNewSignal) {
+    setEntryLock(symbol, signal.side);
+    await sendTelegramWithButtons(buildSignalMessage(symbol, signal, tradePlan), [
+      [{ text: "✅ İşleme Girdim / Takibe Al", callback_data: `TRACK:${symbol}:${approval.id}` }],
+      [{ text: "❌ Girmedim", callback_data: `IGNORE:${symbol}:${approval.id}` }],
+    ]);
+    console.log("✅ Sinyal adayı gönderildi:", symbol, signal.side, signal.score);
+  }
+  return { symbol, signal, tradePlan, currentPrice };
+}
 
-  await sendTelegramWithButtons(buildSignalMessage(symbol, signal, tradePlan), [
-    [{ text: "✅ İşleme Girdim / Takibe Al", callback_data: `TRACK:${symbol}:${approval.id}` }],
-    [{ text: "❌ Girmedim", callback_data: `IGNORE:${symbol}:${approval.id}` }],
-  ]);
+async function executeBestMexcCandidate(candidates) {
+  if (liveExecutionRunning || process.env.EXECUTION_EXCHANGE !== "MEXC" || process.env.MEXC_FUTURES_ENABLED !== "true" || process.env.MEXC_LIVE_TRADING_ENABLED !== "true") return;
+  const rotationBlocked = getRotationBlockedSymbols();
+  const evaluated = candidates.filter((candidate) => !rotationBlocked.has(candidate.symbol)).map((candidate) => ({
+    ...candidate,
+    gate: evaluateLiveCandidate(candidate.symbol, candidate.signal, candidate.tradePlan, currentMarketMeta[candidate.symbol]),
+  })).filter((candidate) => candidate.gate.allowed)
+    .sort((a, b) => b.gate.selectionScore - a.gate.selectionScore);
+  if (!evaluated.length) {
+    console.log("🛡️ Sıkı canlı filtrelerden geçen aday yok.");
+    return;
+  }
 
-  console.log("✅ Sinyal adayı gönderildi:", symbol, signal.side, signal.score);
+  liveExecutionRunning = true;
+  try {
+    const [positions, account] = await Promise.all([getMexcOpenPositions(), getUsdtAccountState()]);
+    const threshold = Number(process.env.MEXC_TIER_THRESHOLD_USDT || 50);
+    const configuredMax = Math.max(1, Number(process.env.MAX_OPEN_POSITIONS || 2));
+    const maxOpen = account.equity >= threshold ? Math.min(2, configuredMax) : 1;
+    if (positions.length >= maxOpen) {
+      console.log(`🛡️ Açık pozisyon limiti dolu: ${positions.length}/${maxOpen}`);
+      return;
+    }
+    const best = evaluated[0];
+    const riskCheck = canOpenTrade();
+    if (!riskCheck.allowed) throw new Error(riskCheck.reason);
+    const liveOrder = await openMexcLiveTrade({
+      symbol: best.symbol,
+      side: best.signal.side,
+      currentPrice: best.currentPrice,
+      stopLossPrice: best.tradePlan.stopLossPrice,
+      takeProfitPrice: best.tradePlan.tp3Price,
+    });
+    registerTradeOpen();
+    registerManagedPosition({
+      symbol: best.symbol,
+      side: best.signal.side,
+      tradePlan: best.tradePlan,
+      vol: liveOrder.vol,
+      marginUsdt: liveOrder.marginUsdt,
+      leverage: liveOrder.leverage,
+    });
+    await sendTelegram(`🔴 <b>MEXC GERÇEK EMİR AÇILDI</b>\n${liveOrder.symbol} ${best.signal.side}\nSeçim puanı: <b>${best.gate.selectionScore}</b>\nHesap değeri: <b>${liveOrder.equityUsdt} USDT</b>\nMarj: <b>${liveOrder.marginUsdt} USDT</b>\nKorunan rezerv: <b>${liveOrder.reserveUsdt} USDT</b>\nKontrat: <b>${liveOrder.vol}</b>\nKaldıraç: <b>${liveOrder.leverage}x</b>\nUygun bakiye varsa farklı coin için ikinci fırsat aranacak.`);
+  } catch (err) {
+    console.error("MEXC en iyi aday emir hatası:", err.message);
+    await sendTelegram(`⚠️ <b>MEXC canlı emir açılamadı</b>\n${err.message}`);
+  } finally {
+    liveExecutionRunning = false;
+  }
 }
 
 async function runScanCycle() {
@@ -389,9 +443,15 @@ async function runScanCycle() {
       return;
     }
     console.log("Piyasa taranıyor...");
-    for (const symbol of SYMBOLS) {
-      try { await scanSymbol(symbol); } catch (err) { console.error(`${symbol} tarama hatası:`, err.message); }
+    const symbols = await getScanUniverse();
+    const candidates = [];
+    for (const symbol of symbols) {
+      try {
+        const candidate = await scanSymbol(symbol);
+        if (candidate) candidates.push(candidate);
+      } catch (err) { console.error(`${symbol} tarama hatası:`, err.message); }
     }
+    await executeBestMexcCandidate(candidates);
     await sendMarketSummaryIfNeeded();
   } finally {
     scanRunning = false;
@@ -401,7 +461,7 @@ async function runScanCycle() {
 function startScanner() {
   console.log("📡 Scanner başlatıldı.");
   runScanCycle().catch((err) => console.error("İlk tarama hatası:", err.message));
-  const seconds = Math.max(15, Number(process.env.SCAN_EVERY_SECONDS || 30));
+  const seconds = Math.max(60, Number(process.env.SCAN_EVERY_SECONDS || 90));
   setInterval(() => runScanCycle().catch((err) => console.error("Tarama döngüsü hatası:", err.message)), seconds * 1000);
 }
 
@@ -409,4 +469,4 @@ function getLatestSignals() { return latestSignals; }
 function getOpportunityRadar() { return buildOpportunityList(latestSignals); }
 function getOpportunityRadarText() { return formatOpportunityTable(latestSignals); }
 
-module.exports = { startScanner, runScanCycle, getLatestSignals, getOpportunityRadar, getOpportunityRadarText };
+module.exports = { startScanner, runScanCycle, getLatestSignals, getOpportunityRadar, getOpportunityRadarText, executeBestMexcCandidate };

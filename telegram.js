@@ -1,8 +1,27 @@
 const axios = require("axios");
 
+function isTradeOnlyAllowed(message) {
+  if (process.env.TELEGRAM_TRADE_ONLY !== "true") return true;
+  const text = String(message || "");
+  return [
+    "MEXC GERÇEK EMİR",
+    "MEXC POZİSYON DURUMU",
+    "MEXC TP1",
+    "MEXC TP2",
+    "MEXC TRAILING",
+    "MEXC İŞLEM KAPANDI",
+    "MEXC canlı emir açılamadı",
+    "Falix Trade Bot çalışıyor",
+  ].some((marker) => text.includes(marker));
+}
+
 async function sendTelegram(message, chatIdOverride = null) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
-  const chatId = chatIdOverride || process.env.TELEGRAM_CHAT_ID;
+  const chatId = process.env.TELEGRAM_TRADE_ONLY === "true"
+    ? process.env.TELEGRAM_CHAT_ID
+    : chatIdOverride || process.env.TELEGRAM_CHAT_ID;
+
+  if (!isTradeOnlyAllowed(message)) return false;
 
   if (!token || !chatId || token.includes("BURAYA")) {
     console.log("Telegram ayarlı değil:", message);
@@ -26,7 +45,11 @@ async function sendTelegram(message, chatIdOverride = null) {
 
 async function sendTelegramWithButtons(message, buttons, chatIdOverride = null) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
-  const chatId = chatIdOverride || process.env.TELEGRAM_CHAT_ID;
+  const chatId = process.env.TELEGRAM_TRADE_ONLY === "true"
+    ? process.env.TELEGRAM_CHAT_ID
+    : chatIdOverride || process.env.TELEGRAM_CHAT_ID;
+
+  if (!isTradeOnlyAllowed(message)) return false;
 
   if (!token || !chatId || token.includes("BURAYA")) {
     console.log("Telegram butonlu mesaj ayarlı değil:", message);
@@ -88,6 +111,7 @@ async function setTelegramWebhook() {
 }
 
 module.exports = {
+  isTradeOnlyAllowed,
   sendTelegram,
   sendTelegramWithButtons,
   answerCallbackQuery,

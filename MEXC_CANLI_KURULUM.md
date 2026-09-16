@@ -19,6 +19,7 @@ MEXC hesabında KYC tamamlanmış olmalı. API anahtarında şunları aç:
 
 ```env
 EXECUTION_EXCHANGE=MEXC
+MARKET_DATA_SOURCE=MEXC
 MEXC_API_KEY=...
 MEXC_SECRET_KEY=...
 MEXC_FUTURES_ENABLED=true

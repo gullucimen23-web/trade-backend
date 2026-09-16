@@ -311,6 +311,9 @@ function analyzeSwingPlan({ candles15m, candles1h, candles4h }) {
   const volumeRatio = Number(entrySignal.volumeRatio || 0);
   const momentum = Number(entrySignal.priceMomentum || 0);
   const adx = Number(entrySignal.adx || 0);
+  const first15mClose = Number(candles15m?.[Math.max(0, candles15m.length - 4)]?.close || price);
+  const move15mPercent = first15mClose ? ((price - first15mClose) / first15mClose) * 100 : 0;
+  const ema21DistancePercent = ema21 ? ((price - ema21) / ema21) * 100 : 0;
 
   const minVol = Number(process.env.V8_MIN_VOLUME_RATIO || process.env.MIN_ENTRY_VOLUME_RATIO || 0.45);
   const minScore = Number(process.env.V8_MIN_SCORE || 52);
@@ -371,11 +374,11 @@ function analyzeSwingPlan({ candles15m, candles1h, candles4h }) {
   const confidence = clamp(score + (volumeRatio >= 1 ? 5 : 0), 0, 100);
 
   const leverage = Number(process.env.V8_LEVERAGE || process.env.SWING_LEVERAGE || process.env.DEFAULT_LEVERAGE || 10);
-  const stopPct = Number(process.env.V8_STOP_PERCENT || 0.45);
-  const tp1Pct = Number(process.env.V8_TP1_PERCENT || 0.35);
-  const tp2Pct = Number(process.env.V8_TP2_PERCENT || 0.65);
-  const tp3Pct = Number(process.env.V8_TP3_PERCENT || 0.95);
-  const rr = round(((tp1Pct * 0.50) + (tp2Pct * 0.30) + (tp3Pct * 0.20)) / stopPct, 2);
+  const stopPct = Number(process.env.V8_STOP_PERCENT || Math.min(1.2, Math.max(0.45, Number(entrySignal.atrPercent || 0.4) * 1.2)));
+  const tp1Pct = Number(process.env.V8_TP1_PERCENT || stopPct);
+  const tp2Pct = Number(process.env.V8_TP2_PERCENT || stopPct * 1.8);
+  const tp3Pct = Number(process.env.V8_TP3_PERCENT || stopPct * 3);
+  const rr = round(((tp1Pct * 0.40) + (tp2Pct * 0.30) + (tp3Pct * 0.30)) / stopPct, 2);
 
   const zonePct = Number(process.env.V8_ENTRY_ZONE_PERCENT || 0.12);
   const entryLow = round(price * (1 - zonePct / 100), 4);
@@ -397,6 +400,8 @@ function analyzeSwingPlan({ candles15m, candles1h, candles4h }) {
     score,
     rawScore: score,
     confidence,
+    move15mPercent: round(move15mPercent, 3),
+    ema21DistancePercent: round(ema21DistancePercent, 3),
     entryApproved,
     entryBlocked: !entryApproved,
     filters,
@@ -444,9 +449,9 @@ function analyzeSwingPlan({ candles15m, candles1h, candles4h }) {
       tp1Percent: round(tp1Pct, 2),
       tp2Percent: round(tp2Pct, 2),
       tp3Percent: round(tp3Pct, 2),
-      tp1ClosePercent: 50,
+      tp1ClosePercent: 40,
       tp2ClosePercent: 30,
-      tp3ClosePercent: 20,
+      tp3ClosePercent: 30,
       riskReward: rr,
       estimatedMarginUsdt: Number(process.env.V8_ESTIMATED_MARGIN_USDT || 35),
       estimatedRiskUsdt: round(Number(process.env.V8_ESTIMATED_MARGIN_USDT || 35) * leverage * (stopPct / 100), 2),

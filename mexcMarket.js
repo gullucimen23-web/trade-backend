@@ -12,6 +12,20 @@ const INTERVALS = {
   "8h": { mexc: "Hour8", seconds: 28800 },
   "1d": { mexc: "Day1", seconds: 86400 },
 };
+let requestQueue = Promise.resolve();
+let lastRequestAt = 0;
+
+function scheduledGet(url, config) {
+  const spacing = Math.max(110, Number(process.env.MEXC_PUBLIC_REQUEST_SPACING_MS || 130));
+  const task = requestQueue.then(async () => {
+    const wait = Math.max(0, spacing - (Date.now() - lastRequestAt));
+    if (wait) await new Promise((resolve) => setTimeout(resolve, wait));
+    lastRequestAt = Date.now();
+    return axios.get(url, config);
+  });
+  requestQueue = task.catch(() => {});
+  return task;
+}
 
 function ensureSuccess(response) {
   if (!response || response.success !== true) {
@@ -27,7 +41,7 @@ async function getKlines(symbol = "BTCUSDT", interval = "5m", limit = 100) {
   const safeLimit = Math.min(2000, Math.max(2, Number(limit || 100)));
   const end = Math.floor(Date.now() / 1000);
   const start = end - rule.seconds * (safeLimit + 5);
-  const { data: response } = await axios.get(`${BASE_URL}/api/v1/contract/kline/${mexcSymbol}`, {
+  const { data: response } = await scheduledGet(`${BASE_URL}/api/v1/contract/kline/${mexcSymbol}`, {
     params: { interval: rule.mexc, start, end },
     timeout: 15000,
   });
@@ -59,7 +73,7 @@ async function getKlines(symbol = "BTCUSDT", interval = "5m", limit = 100) {
 
 async function getPrice(symbol = "BTCUSDT") {
   const mexcSymbol = normalizeSymbol(symbol);
-  const { data: response } = await axios.get(`${BASE_URL}/api/v1/contract/ticker`, {
+  const { data: response } = await scheduledGet(`${BASE_URL}/api/v1/contract/ticker`, {
     params: { symbol: mexcSymbol },
     timeout: 15000,
   });

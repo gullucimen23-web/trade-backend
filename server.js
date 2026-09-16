@@ -35,6 +35,7 @@ const {
   closeLivePosition: closeMexcLivePosition,
   getConfigDiagnostics: getMexcConfigDiagnostics,
 } = require("./mexcFutures");
+const { startMexcPositionManager } = require("./mexcPositionManager");
 
 const app = express();
 app.use(express.json());
@@ -57,7 +58,7 @@ app.get("/", (req, res) => {
   });
 });
 
-app.get("/set-telegram-webhook", async (req, res) => {
+app.get("/set-telegram-webhook", requireAdmin, async (req, res) => {
   try {
     const result = await setTelegramWebhook();
     res.json({ ok: true, result });
@@ -146,24 +147,24 @@ Yeni sinyal bekleniyor.`,
   }
 });
 
-app.get("/start-bot", async (req, res) => {
+app.get("/start-bot", requireAdmin, async (req, res) => {
   startBot();
   await sendTelegram("🟢 Bot başlatıldı. Piyasa taraması aktif.");
   res.json({ ok: true, botActive: isBotActive(), state: getBotState() });
 });
 
-app.get("/stop-bot", async (req, res) => {
+app.get("/stop-bot", requireAdmin, async (req, res) => {
   stopBot();
   await sendTelegram("🔴 Bot durduruldu. Piyasa taraması pasif.");
   res.json({ ok: true, botActive: isBotActive(), state: getBotState() });
 });
 
-app.get("/test-telegram", async (req, res) => {
+app.get("/test-telegram", requireAdmin, async (req, res) => {
   const sent = await sendTelegram("✅ Falix Trade Bot çalışıyor kanka.");
   res.json({ ok: true, telegramSent: sent });
 });
 
-app.get("/test-openai", async (req, res) => {
+app.get("/test-openai", requireAdmin, async (req, res) => {
   const result = await askOpenAIWithGuard({
     symbol: "BTCUSDT",
     signalScore: 88,
@@ -201,7 +202,7 @@ app.get("/signal/:symbol", async (req, res) => {
   }
 });
 
-app.get("/test-binance", async (req, res) => {
+app.get("/test-binance", requireAdmin, async (req, res) => {
   try {
     const account = await getSpotAccount();
     res.json({
@@ -292,7 +293,7 @@ app.get("/paper/report", (req, res) => {
   const report = buildWeeklyReport(getAllTrades(), { days: Number(req.query.days || process.env.REPORT_DAYS || 7) });
   res.json({ ok: true, report, text: formatWeeklyReport(report) });
 });
-app.get("/paper/report/send", async (req, res) => {
+app.get("/paper/report/send", requireAdmin, async (req, res) => {
   const report = buildWeeklyReport(getAllTrades(), { days: Number(req.query.days || process.env.REPORT_DAYS || 7) });
   await sendTelegram(formatWeeklyReport(report));
   res.json({ ok: true, sent: true, report });
@@ -304,7 +305,7 @@ app.get("/paper/export", (req, res) => {
 app.get("/risk", (req, res) => res.json({ ok: true, stats: getRiskStats() }));
 
 
-app.get("/track-now/:symbol/:side", async (req, res) => {
+app.get("/track-now/:symbol/:side", requireAdmin, async (req, res) => {
   try {
     const symbol = req.params.symbol.toUpperCase();
     const side = req.params.side.toUpperCase();
@@ -347,7 +348,7 @@ Bot SL/TP dayatmayacak. Pozisyonu gittiği yere kadar izleyecek ve yön bozulurs
 });
 
 
-app.get("/track-stop/:symbol", async (req, res) => {
+app.get("/track-stop/:symbol", requireAdmin, async (req, res) => {
   try {
     const symbol = req.params.symbol.toUpperCase();
     const userId = String(req.query.userId || process.env.TELEGRAM_CHAT_ID || "");
@@ -381,7 +382,7 @@ app.get("/radar", async (req, res) => {
   }
 });
 
-app.get("/scan-now", async (req, res) => {
+app.get("/scan-now", requireAdmin, async (req, res) => {
   try {
     await runScanCycle();
     res.json({ ok: true, message: "Tarama tamamlandı", signals: getLatestSignals() });
@@ -445,7 +446,7 @@ app.get("/status", (req, res) => {
 
 app.get("/approvals", (req, res) => res.json({ ok: true, approvals: getAllApprovals() }));
 
-app.get("/approve/:symbol", async (req, res) => {
+app.get("/approve/:symbol", requireAdmin, async (req, res) => {
   try {
     const symbol = req.params.symbol.toUpperCase();
     const approval = getApproval(symbol);
@@ -485,7 +486,7 @@ app.get("/approve/:symbol", async (req, res) => {
   }
 });
 
-app.get("/reject/:symbol", async (req, res) => {
+app.get("/reject/:symbol", requireAdmin, async (req, res) => {
   const symbol = req.params.symbol.toUpperCase();
   const approval = rejectTrade(symbol);
   if (!approval) return res.status(404).json({ ok: false, message: "Bekleyen işlem bulunamadı" });
@@ -523,6 +524,7 @@ async function startApp() {
   }
 
   startScanner();
+  startMexcPositionManager();
   startPaperReportScheduler();
 }
 
