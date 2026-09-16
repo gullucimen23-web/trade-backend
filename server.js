@@ -3,7 +3,7 @@ require("dotenv").config();
 const express = require("express");
 const { sendTelegram, sendTelegramWithButtons, answerCallbackQuery, setTelegramWebhook } = require("./telegram");
 const { askOpenAIWithGuard, getOpenAIStats } = require("./openaiGuard");
-const { getKlines, getPrice } = require("./binance");
+const { getKlines, getPrice, getMarketDataSource } = require("./marketData");
 const { analyzeMarket, analyzeMultiTimeframe } = require("./strategy");
 const { startScanner, runScanCycle, getLatestSignals, getOpportunityRadar, getOpportunityRadarText } = require("./scanner");
 const { getSpotAccount } = require("./binancePrivate");
@@ -426,6 +426,7 @@ app.get("/status", (req, res) => {
       marginUsdt: Math.min(25, Number(process.env.MEXC_MARGIN_USDT || 10)),
       leverage: Math.min(10, Number(process.env.MEXC_LEVERAGE || 3)),
     },
+    marketDataSource: getMarketDataSource(),
     followReportMinutes: Number(process.env.FOLLOW_REPORT_MINUTES || 10),
     openai: getOpenAIStats(),
     risk: getRiskStats(),

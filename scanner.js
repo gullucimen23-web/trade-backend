@@ -1,4 +1,4 @@
-const { getKlines } = require("./binance");
+const { getKlines } = require("./marketData");
 const { analyzeMarket, analyzeMultiTimeframe, analyzeSwingPlan } = require("./strategy");
 const { askOpenAIWithGuard } = require("./openaiGuard");
 const { sendTelegram, sendTelegramWithButtons } = require("./telegram");
