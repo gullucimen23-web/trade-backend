@@ -75,7 +75,7 @@ async function createPaperTrade(symbol, signal, tradePlan, options = {}) {
 
   trades.push(trade);
   persist();
-  registerTradeOpen();
+  registerTradeOpen("PAPER");
   return trade;
 }
 
@@ -194,7 +194,7 @@ async function updatePaperTrades(symbol, currentPrice) {
       const finalPnl = pnlNow * finalWeight;
       trade.pnlPercent = Number((Number(trade.partialRealizedPnlPercent || 0) + finalPnl).toFixed(2));
       trade.closedAt = new Date().toISOString();
-      registerTradeClose(trade.pnlPercent);
+      registerTradeClose(trade.pnlPercent, "PAPER");
       closed.push(trade);
       events.push({ type: trade.status, trade, price, pnlPercent: trade.pnlPercent });
       changed = true;

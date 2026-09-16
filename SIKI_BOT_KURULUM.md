@@ -26,6 +26,8 @@ En az 7 gün paper sonuçlarını incele. Kâr garantisi yoktur; pump yakalama f
 - TP1'de %40, TP2'de %30 kısmi kapatma; kalan pozisyonda kâr sonrası trailing çıkış.
 - API hız sınırına karşı istek kuyruğu.
 - Telegram trade-only modunda yalnızca gerçek emir, periyodik kâr/zarar, TP ve kapanış bildirimleri.
+- Mevcut marjin ve kaldıraçla minimum kontratı alınamayan coinleri emirden önce eleme; başarısız coini 30 dakika yeniden denememe.
+- Paper, testnet ve gerçek MEXC günlük işlem/zarar sayaçlarını tamamen ayrı tutma.
 
 ## Canlıya geçmeden önce
 

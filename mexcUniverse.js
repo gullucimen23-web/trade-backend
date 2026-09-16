@@ -39,6 +39,9 @@ function buildUniverse(contracts, tickers, options = {}) {
       mexcSymbol: contract.symbol,
       turnover,
       lastPrice: Number(ticker.lastPrice || 0),
+      contractSize: Number(contract.contractSize || 0),
+      minVol: Number(contract.minVol || 0),
+      volUnit: Number(contract.volUnit || 0),
     };
   }).filter((row) => row.lastPrice > 0 && row.turnover >= minTurnover)
     .sort((a, b) => b.turnover - a.turnover)

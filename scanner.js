@@ -11,7 +11,7 @@ const { getActiveTrackedTradesBySymbol, closeTrackedTrade, saveTrackedTrade } = 
 const { calculatePnlPercent, getPositionAdvice, formatTradeReport } = require("./positionAdvisor");
 const { buildOpportunityList, formatOpportunityTable } = require("./opportunityEngine");
 const { openTestnetTrade } = require("./binanceFuturesTestnet");
-const { openLiveTrade: openMexcLiveTrade, getOpenPositions: getMexcOpenPositions, getUsdtAccountState } = require("./mexcFutures");
+const { openLiveTrade: openMexcLiveTrade, getOpenPositions: getMexcOpenPositions, getUsdtAccountState, calculateTieredMargin } = require("./mexcFutures");
 const { getTradingUniverse } = require("./mexcUniverse");
 const { evaluateLiveCandidate } = require("./liveGate");
 const { registerManagedPosition, getRotationBlockedSymbols } = require("./mexcPositionManager");
@@ -30,6 +30,8 @@ let entryLocks = {};
 let currentScanSymbols = [...SYMBOLS];
 let currentMarketMeta = {};
 let liveExecutionRunning = false;
+let lastInsufficientNoticeAt = 0;
+const liveFailureLocks = {};
 
 async function getScanUniverse() {
   if (process.env.AUTO_SYMBOL_UNIVERSE !== "true" || process.env.MARKET_DATA_SOURCE !== "MEXC") {
@@ -318,12 +320,6 @@ async function scanSymbol(symbol) {
   const isNewSignal = lastSignals[symbol] !== signalKey;
   if (isNewSignal) lastSignals[symbol] = signalKey;
 
-  const riskCheck = canOpenTrade();
-  if (!riskCheck.allowed) {
-    console.log(`⛔ İşlem açılmadı: ${riskCheck.reason}`);
-    return null;
-  }
-
   const tradePlan = buildTradePlan(symbol, signal);
   const approval = createApproval(symbol, signal, tradePlan);
 
@@ -358,7 +354,7 @@ TP1/TP2/TP3: <b>${paperTrade.tp1Price}</b> / <b>${paperTrade.tp2Price}</b> / <b>
         stopLossPrice: tradePlan.stopLossPrice,
         takeProfitPrice: tradePlan.tp3Price || tradePlan.tp2Price || tradePlan.tp1Price,
       });
-      registerTradeOpen();
+      registerTradeOpen("TESTNET");
       await sendTelegram(`🧪 <b>FUTURES TESTNET EMRİ AÇILDI</b>\n${symbol} ${signal.side}\nMiktar: <b>${testOrder.quantity}</b>\nKaldıraç: <b>${testOrder.leverage}x</b>\nBu gerçek para işlemi değildir.`);
     } catch (err) {
       console.error(`${symbol} testnet emir hatası:`, err.message);
@@ -385,18 +381,8 @@ TP1/TP2/TP3: <b>${paperTrade.tp1Price}</b> / <b>${paperTrade.tp2Price}</b> / <b>
 
 async function executeBestMexcCandidate(candidates) {
   if (liveExecutionRunning || process.env.EXECUTION_EXCHANGE !== "MEXC" || process.env.MEXC_FUTURES_ENABLED !== "true" || process.env.MEXC_LIVE_TRADING_ENABLED !== "true") return;
-  const rotationBlocked = getRotationBlockedSymbols();
-  const evaluated = candidates.filter((candidate) => !rotationBlocked.has(candidate.symbol)).map((candidate) => ({
-    ...candidate,
-    gate: evaluateLiveCandidate(candidate.symbol, candidate.signal, candidate.tradePlan, currentMarketMeta[candidate.symbol]),
-  })).filter((candidate) => candidate.gate.allowed)
-    .sort((a, b) => b.gate.selectionScore - a.gate.selectionScore);
-  if (!evaluated.length) {
-    console.log("🛡️ Sıkı canlı filtrelerden geçen aday yok.");
-    return;
-  }
-
   liveExecutionRunning = true;
+  let attemptedSymbol = null;
   try {
     const [positions, account] = await Promise.all([getMexcOpenPositions(), getUsdtAccountState()]);
     const threshold = Number(process.env.MEXC_TIER_THRESHOLD_USDT || 50);
@@ -406,7 +392,41 @@ async function executeBestMexcCandidate(candidates) {
       console.log(`🛡️ Açık pozisyon limiti dolu: ${positions.length}/${maxOpen}`);
       return;
     }
+    const allocation = calculateTieredMargin(account);
+    const leverage = Math.min(10, Math.max(1, Number(process.env.MEXC_LEVERAGE || 3)));
+    const affordableNotional = allocation.marginUsdt * leverage;
+    const failureCooldownMs = Math.max(5, Number(process.env.LIVE_FAILURE_COOLDOWN_MINUTES || 30)) * 60 * 1000;
+    const rotationBlocked = getRotationBlockedSymbols();
+    const gatePassed = candidates.filter((candidate) => !rotationBlocked.has(candidate.symbol))
+      .filter((candidate) => !liveFailureLocks[candidate.symbol] || Date.now() - liveFailureLocks[candidate.symbol] > failureCooldownMs)
+      .map((candidate) => ({
+        ...candidate,
+        gate: evaluateLiveCandidate(candidate.symbol, candidate.signal, candidate.tradePlan, currentMarketMeta[candidate.symbol]),
+      })).filter((candidate) => candidate.gate.allowed);
+
+    const evaluated = gatePassed.filter((candidate) => {
+      const meta = currentMarketMeta[candidate.symbol];
+      if (!meta?.contractSize || !meta?.minVol) return true;
+      const minNotional = Number(meta.contractSize) * Number(meta.minVol) * Number(candidate.currentPrice);
+      candidate.minNotional = Number(minNotional.toFixed(4));
+      return minNotional <= affordableNotional;
+    }).sort((a, b) => b.gate.selectionScore - a.gate.selectionScore);
+
+    if (!evaluated.length) {
+      if (gatePassed.length) {
+        console.log(`💰 Sinyal var ancak minimum kontrat ${affordableNotional} USDT pozisyona uymuyor.`);
+        const noticeMs = Math.max(5, Number(process.env.INSUFFICIENT_NOTICE_MINUTES || 30)) * 60 * 1000;
+        if (Date.now() - lastInsufficientNoticeAt > noticeMs) {
+          lastInsufficientNoticeAt = Date.now();
+          await sendTelegram(`💰 <b>MEXC BAKİYE/KONTRAT UYUMSUZ</b>\nUygun sinyal bulundu ancak minimum kontrat, mevcut <b>${affordableNotional} USDT</b> pozisyon sınırından büyük. Bot daha küçük kontratlı coin aramaya devam ediyor.`);
+        }
+      } else {
+        console.log("🛡️ Sıkı canlı filtrelerden geçen aday yok.");
+      }
+      return;
+    }
     const best = evaluated[0];
+    attemptedSymbol = best.symbol;
     const riskCheck = canOpenTrade();
     if (!riskCheck.allowed) throw new Error(riskCheck.reason);
     const liveOrder = await openMexcLiveTrade({
@@ -427,6 +447,7 @@ async function executeBestMexcCandidate(candidates) {
     });
     await sendTelegram(`🔴 <b>MEXC GERÇEK EMİR AÇILDI</b>\n${liveOrder.symbol} ${best.signal.side}\nSeçim puanı: <b>${best.gate.selectionScore}</b>\nHesap değeri: <b>${liveOrder.equityUsdt} USDT</b>\nMarj: <b>${liveOrder.marginUsdt} USDT</b>\nKorunan rezerv: <b>${liveOrder.reserveUsdt} USDT</b>\nKontrat: <b>${liveOrder.vol}</b>\nKaldıraç: <b>${liveOrder.leverage}x</b>\nUygun bakiye varsa farklı coin için ikinci fırsat aranacak.`);
   } catch (err) {
+    if (attemptedSymbol) liveFailureLocks[attemptedSymbol] = Date.now();
     console.error("MEXC en iyi aday emir hatası:", err.message);
     await sendTelegram(`⚠️ <b>MEXC canlı emir açılamadı</b>\n${err.message}`);
   } finally {

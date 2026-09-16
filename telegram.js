@@ -10,6 +10,7 @@ function isTradeOnlyAllowed(message) {
     "MEXC TP2",
     "MEXC TRAILING",
     "MEXC İŞLEM KAPANDI",
+    "MEXC BAKİYE/KONTRAT UYUMSUZ",
     "MEXC canlı emir açılamadı",
     "Falix Trade Bot çalışıyor",
   ].some((marker) => text.includes(marker));

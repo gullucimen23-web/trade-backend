@@ -2,6 +2,7 @@ const { readJson, writeJson } = require("./dataStore");
 const { getPrice } = require("./mexcMarket");
 const { getOpenPositions, closeLivePositionVolume } = require("./mexcFutures");
 const { sendTelegram } = require("./telegram");
+const { registerTradeClose } = require("./riskGuard");
 
 const FILE = "mexc_managed_positions.json";
 let running = false;
@@ -85,6 +86,11 @@ async function managePositions() {
         row.closedAt = new Date().toISOString();
         row.closeReason = "EXCHANGE_OR_MANUAL_CLOSE";
         const lastPnl = row.lastPnl || { percent: 0, usdt: 0 };
+        if (!row.riskRegistered) {
+          const roe = Number(row.marginUsdt) > 0 ? Number(lastPnl.usdt) / Number(row.marginUsdt) * 100 : Number(lastPnl.percent || 0);
+          registerTradeClose(roe, "LIVE");
+          row.riskRegistered = true;
+        }
         await sendTelegram(`✅ <b>MEXC İŞLEM KAPANDI</b>\n${row.symbol} ${row.side}\nSon ölçülen sonuç: <b>%${lastPnl.percent}</b> / yaklaşık <b>${lastPnl.usdt} USDT</b>\nKesin gerçekleşen sonucu MEXC işlem geçmişinden kontrol et.`);
         continue;
       }
@@ -129,6 +135,11 @@ async function managePositions() {
         row.active = false;
         row.closedAt = new Date().toISOString();
         row.closeReason = "TRAILING_EXIT";
+        if (!row.riskRegistered) {
+          const roe = Number(row.marginUsdt) > 0 ? Number(pnl.usdt) / Number(row.marginUsdt) * 100 : Number(pnl.percent || 0);
+          registerTradeClose(roe, "LIVE");
+          row.riskRegistered = true;
+        }
         await sendTelegram(`🔒 <b>MEXC TRAILING ÇIKIŞ</b>\n${row.symbol} ${row.side}\nSonuç: <b>%${pnl.percent}</b> / yaklaşık <b>${pnl.usdt} USDT</b>\nKapatılan kontrat: <b>${result.vol}</b>`);
       }
     }
