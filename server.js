@@ -19,9 +19,33 @@ const {
   getTrackedTrades,
   getActiveTrackedTrades,
 } = require("./trackStore");
+const {
+  BASE_URL: FUTURES_TESTNET_URL,
+  syncTime: syncFuturesTestnetTime,
+  getAccount: getFuturesTestnetAccount,
+  getOpenPosition: getFuturesTestnetPosition,
+  cancelOpenOrders: cancelFuturesTestnetOrders,
+  closePositionAtMarket: closeFuturesTestnetPosition,
+} = require("./binanceFuturesTestnet");
+const {
+  BASE_URL: MEXC_URL,
+  syncTime: syncMexcTime,
+  getAssets: getMexcAssets,
+  getOpenPositions: getMexcOpenPositions,
+  closeLivePosition: closeMexcLivePosition,
+} = require("./mexcFutures");
 
 const app = express();
 app.use(express.json());
+
+function requireAdmin(req, res, next) {
+  const expected = process.env.ADMIN_TOKEN;
+  const supplied = req.get("X-Admin-Token");
+  if (!expected || supplied !== expected) {
+    return res.status(401).json({ ok: false, error: "Geçerli X-Admin-Token gerekli" });
+  }
+  next();
+}
 
 app.get("/", (req, res) => {
   res.json({
@@ -196,6 +220,71 @@ app.get("/test-binance", async (req, res) => {
   }
 });
 
+app.get("/test-futures-testnet", async (req, res) => {
+  try {
+    await syncFuturesTestnetTime();
+    const account = await getFuturesTestnetAccount();
+    res.json({
+      ok: true,
+      environment: "BINANCE_FUTURES_TESTNET",
+      baseUrl: FUTURES_TESTNET_URL,
+      canTrade: account.canTrade,
+      availableBalance: account.availableBalance,
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/test-mexc", requireAdmin, async (req, res) => {
+  try {
+    await syncMexcTime();
+    const assets = await getMexcAssets();
+    const usdt = assets.find((a) => a.currency === "USDT");
+    res.json({
+      ok: true,
+      environment: "MEXC_LIVE",
+      baseUrl: MEXC_URL,
+      liveTradingEnabled: process.env.MEXC_LIVE_TRADING_ENABLED === "true",
+      availableBalance: usdt?.availableBalance,
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/mexc/close/:symbol", requireAdmin, async (req, res) => {
+  try {
+    const result = await closeMexcLivePosition(req.params.symbol);
+    res.json({ ok: true, environment: "MEXC_LIVE", result });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/mexc/positions", requireAdmin, async (req, res) => {
+  try {
+    const positions = await getMexcOpenPositions(req.query.symbol);
+    res.json({ ok: true, environment: "MEXC_LIVE", positions });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/testnet/close/:symbol", async (req, res) => {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const position = await getFuturesTestnetPosition(symbol);
+    if (!position) return res.status(404).json({ ok: false, error: "Açık testnet pozisyonu yok" });
+    const side = Number(position.positionAmt) > 0 ? "LONG" : "SHORT";
+    await cancelFuturesTestnetOrders(symbol).catch(() => {});
+    const result = await closeFuturesTestnetPosition(symbol, side);
+    res.json({ ok: true, environment: "BINANCE_FUTURES_TESTNET", result });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get("/paper/open", (req, res) => res.json({ ok: true, trades: getOpenTrades() }));
 app.get("/paper/all", (req, res) => res.json({ ok: true, trades: getAllTrades() }));
 app.get("/paper/report", (req, res) => {
@@ -321,6 +410,21 @@ app.get("/status", (req, res) => {
     tradeMode: process.env.TRADE_MODE || "SPOT",
     autoMode: process.env.AUTO_MODE === "true",
     autoMinScore: Number(process.env.AUTO_MIN_SCORE || 95),
+    futuresTestnet: {
+      enabled: process.env.FUTURES_TESTNET_ENABLED === "true",
+      autoTrading: process.env.AUTO_TESTNET_TRADING === "true",
+      minScore: Number(process.env.AUTO_TESTNET_MIN_SCORE || 88),
+      marginUsdt: Number(process.env.TESTNET_MARGIN_USDT || 10),
+      leverage: Number(process.env.TESTNET_LEVERAGE || 3),
+    },
+    mexcLive: {
+      selected: process.env.EXECUTION_EXCHANGE === "MEXC",
+      enabled: process.env.MEXC_FUTURES_ENABLED === "true",
+      liveTrading: process.env.MEXC_LIVE_TRADING_ENABLED === "true",
+      minScore: Number(process.env.MEXC_AUTO_MIN_SCORE || 90),
+      marginUsdt: Math.min(25, Number(process.env.MEXC_MARGIN_USDT || 10)),
+      leverage: Math.min(10, Number(process.env.MEXC_LEVERAGE || 3)),
+    },
     followReportMinutes: Number(process.env.FOLLOW_REPORT_MINUTES || 10),
     openai: getOpenAIStats(),
     risk: getRiskStats(),

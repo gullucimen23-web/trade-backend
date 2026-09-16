@@ -10,6 +10,8 @@ const { isBotActive } = require("./botState");
 const { getActiveTrackedTradesBySymbol, closeTrackedTrade, saveTrackedTrade } = require("./trackStore");
 const { calculatePnlPercent, getPositionAdvice, formatTradeReport } = require("./positionAdvisor");
 const { buildOpportunityList, formatOpportunityTable } = require("./opportunityEngine");
+const { openTestnetTrade } = require("./binanceFuturesTestnet");
+const { openLiveTrade: openMexcLiveTrade } = require("./mexcFutures");
 
 const SYMBOLS = (process.env.SYMBOLS || "BTCUSDT,ETHUSDT,SOLUSDT")
   .split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
@@ -311,6 +313,54 @@ Entry: <b>${paperTrade.entry}</b>
 Stop: <b>${paperTrade.stopLossPrice}</b>
 TP1/TP2/TP3: <b>${paperTrade.tp1Price}</b> / <b>${paperTrade.tp2Price}</b> / <b>${paperTrade.tp3Price}</b>`);
       }
+    }
+  }
+
+  if (
+    process.env.EXECUTION_EXCHANGE === "MEXC" &&
+    process.env.MEXC_FUTURES_ENABLED === "true" &&
+    process.env.MEXC_LIVE_TRADING_ENABLED === "true" &&
+    signal.entryApproved === true &&
+    signal.entryBlocked !== true &&
+    Number(signal.score || 0) >= Number(process.env.MEXC_AUTO_MIN_SCORE || 90)
+  ) {
+    try {
+      const liveOrder = await openMexcLiveTrade({
+        symbol,
+        side: signal.side,
+        currentPrice,
+        stopLossPrice: tradePlan.stopLossPrice,
+        takeProfitPrice: tradePlan.tp3Price || tradePlan.tp2Price || tradePlan.tp1Price,
+      });
+      registerTradeOpen();
+      await sendTelegram(`🔴 <b>MEXC GERÇEK EMİR AÇILDI</b>\n${liveOrder.symbol} ${signal.side}\nKontrat: <b>${liveOrder.vol}</b>\nKaldıraç: <b>${liveOrder.leverage}x</b>\nMarj: <b>${liveOrder.marginUsdt} USDT</b>`);
+    } catch (err) {
+      console.error(`${symbol} MEXC canlı emir hatası:`, err.message);
+      await sendTelegram(`⚠️ <b>MEXC canlı emir açılamadı</b>\n${symbol}\n${err.message}`);
+    }
+  }
+
+  if (
+    process.env.EXECUTION_EXCHANGE !== "MEXC" &&
+    process.env.FUTURES_TESTNET_ENABLED === "true" &&
+    process.env.AUTO_TESTNET_TRADING === "true" &&
+    signal.entryApproved === true &&
+    signal.entryBlocked !== true &&
+    Number(signal.score || 0) >= Number(process.env.AUTO_TESTNET_MIN_SCORE || 88)
+  ) {
+    try {
+      const testOrder = await openTestnetTrade({
+        symbol,
+        side: signal.side,
+        currentPrice,
+        stopLossPrice: tradePlan.stopLossPrice,
+        takeProfitPrice: tradePlan.tp3Price || tradePlan.tp2Price || tradePlan.tp1Price,
+      });
+      registerTradeOpen();
+      await sendTelegram(`🧪 <b>FUTURES TESTNET EMRİ AÇILDI</b>\n${symbol} ${signal.side}\nMiktar: <b>${testOrder.quantity}</b>\nKaldıraç: <b>${testOrder.leverage}x</b>\nBu gerçek para işlemi değildir.`);
+    } catch (err) {
+      console.error(`${symbol} testnet emir hatası:`, err.message);
+      await sendTelegram(`⚠️ <b>Testnet emir açılamadı</b>\n${symbol}\n${err.message}`);
     }
   }
 
