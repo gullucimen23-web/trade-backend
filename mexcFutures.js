@@ -6,11 +6,19 @@ const LIVE_CONFIRMATION = "MEXC_REAL_MONEY";
 let timeOffsetMs = 0;
 const contractCache = new Map();
 
+function apiKey() {
+  return String(process.env.MEXC_API_KEY || "").trim();
+}
+
+function secretKey() {
+  return String(process.env.MEXC_SECRET_KEY || "").trim();
+}
+
 function assertReadConfigured() {
   if (process.env.MEXC_FUTURES_ENABLED !== "true") {
     throw new Error("MEXC_FUTURES_ENABLED=true değil");
   }
-  if (!process.env.MEXC_API_KEY || !process.env.MEXC_SECRET_KEY) {
+  if (!apiKey() || !secretKey()) {
     throw new Error("MEXC API anahtarları eksik");
   }
 }
@@ -34,14 +42,14 @@ function normalizeSymbol(symbol) {
 
 function signature(timestamp, parameterString) {
   return crypto
-    .createHmac("sha256", process.env.MEXC_SECRET_KEY)
-    .update(`${process.env.MEXC_API_KEY}${timestamp}${parameterString}`)
+    .createHmac("sha256", secretKey())
+    .update(`${apiKey()}${timestamp}${parameterString}`)
     .digest("hex");
 }
 
 function headers(timestamp, parameterString) {
   return {
-    ApiKey: process.env.MEXC_API_KEY,
+    ApiKey: apiKey(),
     "Request-Time": String(timestamp),
     Signature: signature(timestamp, parameterString),
     "Recv-Window": "10",
@@ -205,6 +213,19 @@ async function closeLivePosition(symbol) {
   return results;
 }
 
+function getConfigDiagnostics() {
+  const rawApiKey = String(process.env.MEXC_API_KEY || "");
+  const rawSecretKey = String(process.env.MEXC_SECRET_KEY || "");
+  return {
+    apiKeyConfigured: apiKey().length > 0,
+    secretKeyConfigured: secretKey().length > 0,
+    apiKeyLength: apiKey().length,
+    secretKeyLength: secretKey().length,
+    apiKeyHadOuterWhitespace: rawApiKey !== rawApiKey.trim(),
+    secretKeyHadOuterWhitespace: rawSecretKey !== rawSecretKey.trim(),
+  };
+}
+
 module.exports = {
   BASE_URL,
   LIVE_CONFIRMATION,
@@ -214,4 +235,5 @@ module.exports = {
   getOpenPositions,
   openLiveTrade,
   closeLivePosition,
+  getConfigDiagnostics,
 };

@@ -33,6 +33,7 @@ const {
   getAssets: getMexcAssets,
   getOpenPositions: getMexcOpenPositions,
   closeLivePosition: closeMexcLivePosition,
+  getConfigDiagnostics: getMexcConfigDiagnostics,
 } = require("./mexcFutures");
 
 const app = express();
@@ -249,7 +250,7 @@ app.get("/test-mexc", requireAdmin, async (req, res) => {
       availableBalance: usdt?.availableBalance,
     });
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: err.message, config: getMexcConfigDiagnostics() });
   }
 });
 
