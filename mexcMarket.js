@@ -68,7 +68,11 @@ async function getKlines(symbol = "BTCUSDT", interval = "5m", limit = 100) {
       closeTime: (Number(data.time[i]) + rule.seconds) * 1000 - 1,
     });
   }
-  return candles.slice(-safeLimit);
+  // MEXC son dizide halen oluşan mumu da döndürebilir. Hacim ve sinyal
+  // hesaplarında yalnızca kapanmış mumları kullanarak x0.01 gibi sahte oranları önle.
+  const closedCandles = candles.filter((candle) => candle.closeTime <= Date.now() - 1500);
+  if (closedCandles.length < 2) throw new Error(`${mexcSymbol} için yeterli kapanmış MEXC mumu yok`);
+  return closedCandles.slice(-safeLimit);
 }
 
 async function getPrice(symbol = "BTCUSDT") {

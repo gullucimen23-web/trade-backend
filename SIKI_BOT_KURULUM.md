@@ -28,6 +28,7 @@ En az 7 gün paper sonuçlarını incele. Kâr garantisi yoktur; pump yakalama f
 - Telegram trade-only modunda yalnızca gerçek emir, periyodik kâr/zarar, TP ve kapanış bildirimleri.
 - Mevcut marjin ve kaldıraçla minimum kontratı alınamayan coinleri emirden önce eleme; başarısız coini 30 dakika yeniden denememe.
 - Paper, testnet ve gerçek MEXC günlük işlem/zarar sayaçlarını tamamen ayrı tutma.
+- Hacim hesabında yalnızca kapanmış mumları kullanma; WAIT sinyallerini onay listesine almama ve emir öncesi güncel fiyat kayma kontrolü.
 
 ## Canlıya geçmeden önce
 

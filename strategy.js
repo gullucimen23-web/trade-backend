@@ -373,7 +373,13 @@ function analyzeSwingPlan({ candles15m, candles1h, candles4h }) {
   const entryApproved = side !== "NONE" && volumeOk && score >= minScore;
   const confidence = clamp(score + (volumeRatio >= 1 ? 5 : 0), 0, 100);
 
-  const leverage = Number(process.env.V8_LEVERAGE || process.env.SWING_LEVERAGE || process.env.DEFAULT_LEVERAGE || 10);
+  const mexcMode = process.env.EXECUTION_EXCHANGE === "MEXC";
+  const leverage = Number(mexcMode
+    ? process.env.MEXC_LEVERAGE || 3
+    : process.env.V8_LEVERAGE || process.env.SWING_LEVERAGE || process.env.DEFAULT_LEVERAGE || 10);
+  const estimatedMarginUsdt = Number(mexcMode
+    ? process.env.MEXC_SMALL_MARGIN_USDT || 10
+    : process.env.V8_ESTIMATED_MARGIN_USDT || 35);
   const stopPct = Number(process.env.V8_STOP_PERCENT || Math.min(1.2, Math.max(0.45, Number(entrySignal.atrPercent || 0.4) * 1.2)));
   const tp1Pct = Number(process.env.V8_TP1_PERCENT || stopPct);
   const tp2Pct = Number(process.env.V8_TP2_PERCENT || stopPct * 1.8);
@@ -453,9 +459,9 @@ function analyzeSwingPlan({ candles15m, candles1h, candles4h }) {
       tp2ClosePercent: 30,
       tp3ClosePercent: 30,
       riskReward: rr,
-      estimatedMarginUsdt: Number(process.env.V8_ESTIMATED_MARGIN_USDT || 35),
-      estimatedRiskUsdt: round(Number(process.env.V8_ESTIMATED_MARGIN_USDT || 35) * leverage * (stopPct / 100), 2),
-      requiredNotionalUsdt: round(Number(process.env.V8_ESTIMATED_MARGIN_USDT || 35) * leverage, 2),
+      estimatedMarginUsdt,
+      estimatedRiskUsdt: round(estimatedMarginUsdt * leverage * (stopPct / 100), 2),
+      requiredNotionalUsdt: round(estimatedMarginUsdt * leverage, 2),
       timeWindow: process.env.V8_TIME_WINDOW || "5-45 dk",
     },
     guide: {

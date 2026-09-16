@@ -1,4 +1,4 @@
-const { getKlines } = require("./marketData");
+const { getKlines, getPrice } = require("./marketData");
 const { analyzeMarket, analyzeMultiTimeframe, analyzeSwingPlan } = require("./strategy");
 const { askOpenAIWithGuard } = require("./openaiGuard");
 const { sendTelegram, sendTelegramWithButtons } = require("./telegram");
@@ -321,6 +321,10 @@ async function scanSymbol(symbol) {
   if (isNewSignal) lastSignals[symbol] = signalKey;
 
   const tradePlan = buildTradePlan(symbol, signal);
+  const candidate = { symbol, signal, tradePlan, currentPrice };
+  if (signal.entryApproved !== true || signal.entryBlocked === true) {
+    return candidate;
+  }
   const approval = createApproval(symbol, signal, tradePlan);
 
   if (isNewSignal && process.env.AUTO_PAPER_TRADING !== "false") {
@@ -376,7 +380,7 @@ TP1/TP2/TP3: <b>${paperTrade.tp1Price}</b> / <b>${paperTrade.tp2Price}</b> / <b>
     ]);
     console.log("✅ Sinyal adayı gönderildi:", symbol, signal.side, signal.score);
   }
-  return { symbol, signal, tradePlan, currentPrice };
+  return candidate;
 }
 
 async function executeBestMexcCandidate(candidates) {
@@ -429,10 +433,17 @@ async function executeBestMexcCandidate(candidates) {
     attemptedSymbol = best.symbol;
     const riskCheck = canOpenTrade();
     if (!riskCheck.allowed) throw new Error(riskCheck.reason);
+    const latestPrice = Number((await getPrice(best.symbol)).price);
+    const signalPrice = Number(best.currentPrice);
+    const slippagePercent = signalPrice ? Math.abs((latestPrice - signalPrice) / signalPrice) * 100 : 999;
+    const maxSlippage = Math.max(0.05, Number(process.env.LIVE_MAX_SIGNAL_SLIPPAGE_PERCENT || 0.25));
+    if (slippagePercent > maxSlippage) {
+      throw new Error(`${best.symbol} fiyatı sinyalden %${slippagePercent.toFixed(2)} uzaklaştı; geç giriş yapılmadı`);
+    }
     const liveOrder = await openMexcLiveTrade({
       symbol: best.symbol,
       side: best.signal.side,
-      currentPrice: best.currentPrice,
+      currentPrice: latestPrice,
       stopLossPrice: best.tradePlan.stopLossPrice,
       takeProfitPrice: best.tradePlan.tp3Price,
     });
