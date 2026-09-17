@@ -31,7 +31,7 @@ function getManagedPositionsSummary() {
   }));
 }
 
-function registerManagedPosition({ symbol, side, tradePlan, vol, marginUsdt, leverage }) {
+function registerManagedPosition({ symbol, side, tradePlan, vol, marginUsdt, equityUsdt, leverage }) {
   const rows = load();
   rows.push({
     id: `mexc_${Date.now()}`,
@@ -39,6 +39,7 @@ function registerManagedPosition({ symbol, side, tradePlan, vol, marginUsdt, lev
     side,
     expectedVol: Number(vol),
     marginUsdt: Number(marginUsdt || 0),
+    equityUsdt: Number(equityUsdt || 0),
     leverage: Number(leverage || 1),
     entry: Number(tradePlan.entry),
     tp1Price: Number(tradePlan.tp1Price),
@@ -62,6 +63,13 @@ function calculatePositionPnl(row, price, entryOverride = null) {
     : ((entry - price) / entry) * 100;
   const usdt = Number(row.marginUsdt || 0) * Number(row.leverage || 1) * percent / 100;
   return { percent: Number(percent.toFixed(3)), usdt: Number(usdt.toFixed(3)) };
+}
+
+function accountPnlPercent(row, pnl) {
+  const equity = Number(row.equityUsdt || 0);
+  if (equity > 0) return Number(pnl.usdt || 0) / equity * 100;
+  // Yalnızca eski, equity kaydı bulunmayan pozisyonlar için güvenli geri dönüş.
+  return Number(pnl.percent || 0);
 }
 
 function getRotationBlockedSymbols() {
@@ -158,8 +166,7 @@ async function managePositions() {
         row.closeReason = "EXCHANGE_OR_MANUAL_CLOSE";
         const lastPnl = row.lastPnl || { percent: 0, usdt: 0 };
         if (!row.riskRegistered) {
-          const roe = Number(row.marginUsdt) > 0 ? Number(lastPnl.usdt) / Number(row.marginUsdt) * 100 : Number(lastPnl.percent || 0);
-          registerTradeClose(roe, "LIVE");
+          registerTradeClose(accountPnlPercent(row, lastPnl), "LIVE");
           row.riskRegistered = true;
         }
         await sendTelegram(`✅ <b>MEXC İŞLEM KAPANDI</b>\n${row.symbol} ${row.side}\nSon ölçülen sonuç: <b>%${lastPnl.percent}</b> / yaklaşık <b>${lastPnl.usdt} USDT</b>\nKesin gerçekleşen sonucu MEXC işlem geçmişinden kontrol et.`);
@@ -200,8 +207,7 @@ async function managePositions() {
         row.closedAt = new Date().toISOString();
         row.closeReason = defense.action;
         if (!row.riskRegistered) {
-          const roe = Number(row.marginUsdt) > 0 ? Number(pnl.usdt) / Number(row.marginUsdt) * 100 : Number(pnl.percent || 0);
-          registerTradeClose(roe, "LIVE");
+          registerTradeClose(accountPnlPercent(row, pnl), "LIVE");
           row.riskRegistered = true;
         }
         const title = defense.action === "PROFIT_GUARD_EXIT" ? "KÂR KORUMA ÇIKIŞI" : "SÜRE DOLUŞU ÇIKIŞI";
@@ -246,8 +252,7 @@ async function managePositions() {
         row.closedAt = new Date().toISOString();
         row.closeReason = "TRAILING_EXIT";
         if (!row.riskRegistered) {
-          const roe = Number(row.marginUsdt) > 0 ? Number(pnl.usdt) / Number(row.marginUsdt) * 100 : Number(pnl.percent || 0);
-          registerTradeClose(roe, "LIVE");
+          registerTradeClose(accountPnlPercent(row, pnl), "LIVE");
           row.riskRegistered = true;
         }
         await sendTelegram(`🔒 <b>MEXC TRAILING ÇIKIŞ</b>\n${row.symbol} ${row.side}\nSonuç: <b>%${pnl.percent}</b> / yaklaşık <b>${pnl.usdt} USDT</b>\nKapatılan kontrat: <b>${result.vol}</b>`);

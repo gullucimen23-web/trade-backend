@@ -458,6 +458,7 @@ async function executeBestMexcCandidate(candidates) {
       },
       vol: liveOrder.vol,
       marginUsdt: liveOrder.marginUsdt,
+      equityUsdt: liveOrder.equityUsdt,
       leverage: liveOrder.leverage,
     });
     await sendTelegram(`🔴 <b>MEXC GERÇEK EMİR AÇILDI</b>\n${liveOrder.symbol} ${best.signal.side}\nSeçim puanı: <b>${best.gate.selectionScore}</b>\nGerçek giriş: <b>${liveOrder.entryPrice}</b>\nBorsa stopu: <b>${liveOrder.stopLossPrice}</b> ✅\nHesap değeri: <b>${liveOrder.equityUsdt} USDT</b>\nMarj: <b>${liveOrder.marginUsdt} USDT</b>\nKorunan rezerv: <b>${liveOrder.reserveUsdt} USDT</b>\nKontrat: <b>${liveOrder.vol}</b>\nKaldıraç: <b>${liveOrder.leverage}x</b>`);

@@ -3,12 +3,21 @@ const { readJson, writeJson } = require("./dataStore");
 const KINDS = ["LIVE", "PAPER", "TESTNET"];
 const files = { LIVE: "live_stats.json", PAPER: "paper_stats.json", TESTNET: "testnet_stats.json" };
 const stats = {};
+const RISK_METRIC_VERSION = 2;
 
 function fresh() {
-  return { date: new Date().toISOString().slice(0, 10), tradesToday: 0, lossPercentToday: 0, consecutiveLosses: 0, pauseUntil: null };
+  return { metricVersion: RISK_METRIC_VERSION, date: new Date().toISOString().slice(0, 10), tradesToday: 0, lossPercentToday: 0, consecutiveLosses: 0, pauseUntil: null };
 }
 
-for (const kind of KINDS) stats[kind] = readJson(files[kind], fresh());
+for (const kind of KINDS) {
+  const loaded = readJson(files[kind], fresh());
+  // Eski sürüm canlı zararı toplam hesap yerine kullanılan marja göre
+  // kaydediyordu. Bu değer yeni metrikle karşılaştırılamaz; bir defaya
+  // mahsus temizleyerek yanlış günlük kilidi kaldır.
+  stats[kind] = Number(loaded?.metricVersion) === RISK_METRIC_VERSION
+    ? { ...fresh(), ...loaded, metricVersion: RISK_METRIC_VERSION }
+    : fresh();
+}
 
 function normalizeKind(kind) {
   const value = String(kind || "LIVE").toUpperCase();
