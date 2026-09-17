@@ -68,6 +68,43 @@ function retraceReached(row, price) {
     : price >= row.peakPrice * (1 + pct / 100);
 }
 
+function numberEnv(name, fallback, min = -Infinity) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) ? Math.max(min, value) : fallback;
+}
+
+function evaluateProfitDefense(row, pnl, now = Date.now()) {
+  if (process.env.PROFIT_GUARD_ENABLED === "false" || row.tp1Done) return { action: null };
+
+  const currentPercent = Number(pnl.percent || 0);
+  const previousPeak = Number(row.bestPnlPercent || 0);
+  const peakPercent = Math.max(previousPeak, currentPercent);
+  const armPercent = numberEnv("PROFIT_GUARD_ARM_PERCENT", 0.25, 0.05);
+  const givebackRatio = numberEnv("PROFIT_GUARD_GIVEBACK_PERCENT", 40, 5) / 100;
+  const estimatedRoundTripFeePercent = numberEnv("PROFIT_GUARD_FEE_PERCENT", 0.10, 0);
+  const minNetUsdt = numberEnv("PROFIT_GUARD_MIN_NET_USDT", 0.02, 0);
+  const notionalUsdt = Number(row.marginUsdt || 0) * Number(row.leverage || 1);
+  const estimatedFeeUsdt = notionalUsdt * estimatedRoundTripFeePercent / 100;
+  const estimatedNetUsdt = Number(pnl.usdt || 0) - estimatedFeeUsdt;
+  const giveback = peakPercent > 0 ? (peakPercent - currentPercent) / peakPercent : 0;
+  const armed = Boolean(row.profitGuardArmed) || peakPercent >= armPercent;
+
+  const maxMinutes = numberEnv("MAX_POSITION_MINUTES", 90, 5);
+  const timeExitMaxLossPercent = numberEnv("TIME_EXIT_MAX_LOSS_PERCENT", 0.12, 0);
+  const ageMinutes = Math.max(0, (now - new Date(row.createdAt).getTime()) / 60000);
+
+  if (armed && giveback >= givebackRatio && currentPercent > estimatedRoundTripFeePercent && estimatedNetUsdt >= minNetUsdt) {
+    return { action: "PROFIT_GUARD_EXIT", armed, peakPercent, giveback, estimatedNetUsdt, ageMinutes };
+  }
+
+  if (ageMinutes >= maxMinutes && currentPercent >= -timeExitMaxLossPercent) {
+    const action = estimatedNetUsdt > 0 ? "TIME_PROFIT_EXIT" : "TIME_FLAT_EXIT";
+    return { action, armed, peakPercent, giveback, estimatedNetUsdt, ageMinutes };
+  }
+
+  return { action: null, armed, peakPercent, giveback, estimatedNetUsdt, ageMinutes };
+}
+
 async function managePositions() {
   if (running || process.env.MEXC_LIVE_TRADING_ENABLED !== "true") return;
   running = true;
@@ -102,6 +139,10 @@ async function managePositions() {
       row.entry = entryPrice;
       row.lastPrice = price;
       row.lastPnl = pnl;
+      const defense = evaluateProfitDefense(row, pnl);
+      row.bestPnlPercent = Number(defense.peakPercent || row.bestPnlPercent || 0);
+      row.bestPnlUsdt = Math.max(Number(row.bestPnlUsdt || 0), Number(pnl.usdt || 0));
+      row.profitGuardArmed = Boolean(defense.armed);
       row.peakPrice = row.side === "LONG" ? Math.max(Number(row.peakPrice), price) : Math.min(Number(row.peakPrice), price);
       const available = Math.max(0, Number(position.holdVol) - Number(position.frozenVol || 0));
 
@@ -111,6 +152,21 @@ async function managePositions() {
         row.lastPnlNoticeAt = new Date().toISOString();
         const icon = pnl.usdt >= 0 ? "🟢" : "🔴";
         await sendTelegram(`${icon} <b>MEXC POZİSYON DURUMU</b>\n${row.symbol} ${row.side}\nGiriş: <b>${entryPrice}</b>\nŞu an: <b>${price}</b>\nKâr/Zarar: <b>%${pnl.percent}</b>\nYaklaşık sonuç: <b>${pnl.usdt} USDT</b>`);
+      }
+
+      if (defense.action && available > 0) {
+        const result = await closeLivePositionVolume(position, available);
+        row.active = false;
+        row.closedAt = new Date().toISOString();
+        row.closeReason = defense.action;
+        if (!row.riskRegistered) {
+          const roe = Number(row.marginUsdt) > 0 ? Number(pnl.usdt) / Number(row.marginUsdt) * 100 : Number(pnl.percent || 0);
+          registerTradeClose(roe, "LIVE");
+          row.riskRegistered = true;
+        }
+        const title = defense.action === "PROFIT_GUARD_EXIT" ? "KÂR KORUMA ÇIKIŞI" : "SÜRE DOLUŞU ÇIKIŞI";
+        await sendTelegram(`🔐 <b>MEXC ${title}</b>\n${row.symbol} ${row.side}\nEn iyi hareket: <b>%${Number(defense.peakPercent).toFixed(3)}</b>\nÇıkış anı: <b>%${pnl.percent}</b> / yaklaşık <b>${pnl.usdt} USDT</b>\nTahmini komisyon sonrası: <b>${Number(defense.estimatedNetUsdt).toFixed(3)} USDT</b>\nKapatılan kontrat: <b>${result.vol}</b>`);
+        continue;
       }
 
       if (!row.tp1Done && targetReached(row, price, row.tp1Price)) {
@@ -157,4 +213,4 @@ function startMexcPositionManager() {
   console.log(`🛡️ MEXC pozisyon yöneticisi aktif: ${seconds} saniye`);
 }
 
-module.exports = { registerManagedPosition, getRotationBlockedSymbols, calculatePositionPnl, managePositions, startMexcPositionManager };
+module.exports = { registerManagedPosition, getRotationBlockedSymbols, calculatePositionPnl, evaluateProfitDefense, managePositions, startMexcPositionManager };
