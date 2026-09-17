@@ -159,6 +159,19 @@ async function getOpenPositions(symbol) {
   return Array.isArray(positions) ? positions.filter((p) => Number(p.holdVol) > 0 && Number(p.state) !== 3) : [];
 }
 
+async function getCurrentTpslOrders(symbol) {
+  const orders = await privateGet("/api/v1/private/stoporder/open_orders", symbol ? { symbol: normalizeSymbol(symbol) } : {});
+  return Array.isArray(orders) ? orders : [];
+}
+
+async function cancelPositionTpsl(position) {
+  if (!position?.positionId) throw new Error("TP/SL iptali için positionId eksik");
+  return privatePost("/api/v1/private/stoporder/cancel_all", {
+    positionId: position.positionId,
+    symbol: position.symbol,
+  });
+}
+
 function floorToStep(value, step) {
   const stepText = String(step);
   const precision = stepText.includes(".") ? stepText.split(".")[1].length : 0;
@@ -186,6 +199,58 @@ function normalizeProtectionPrices({ side, currentPrice, stopLossPrice, takeProf
     throw new Error(`MEXC koruma fiyatları yönle uyumsuz: fiyat=${current}, stop=${stop}, tp=${take}`);
   }
   return { stopLossPrice: stop, takeProfitPrice: take };
+}
+
+function normalizeStopPrice(positionType, stopLossPrice, priceUnit) {
+  const tick = Number(priceUnit);
+  if (!Number.isFinite(tick) || tick <= 0) throw new Error("MEXC kontrat priceUnit geçersiz");
+  return Number(positionType) === 1
+    ? floorToStep(stopLossPrice, tick)
+    : ceilToStep(stopLossPrice, tick);
+}
+
+async function placePositionStop(position, stopLossPrice, requestedVol = null) {
+  if (!position?.positionId || !position?.symbol) throw new Error("Stop kurulacak MEXC pozisyonu geçersiz");
+  const contract = await getContract(position.symbol);
+  const vol = floorToStep(Number(requestedVol ?? position.holdVol), contract.volUnit);
+  if (vol < Number(contract.minVol)) throw new Error(`${position.symbol} stop miktarı minimumun altında`);
+  const stop = normalizeStopPrice(position.positionType, stopLossPrice, contract.priceUnit);
+  const triggerType = contract.stopOnlyFair === true
+    ? 2
+    : Math.min(3, Math.max(1, Number(process.env.MEXC_TRIGGER_PRICE_TYPE || 1)));
+  const result = await privatePost("/api/v1/private/stoporder/place", {
+    positionId: position.positionId,
+    vol,
+    stopLossPrice: stop,
+    lossTrend: triggerType,
+    profitTrend: triggerType,
+    profitLossVolType: "SAME",
+    volType: 2,
+    stopLossType: 0,
+    stopLossOrderPrice: 0,
+  });
+  return { result, stopLossPrice: stop, vol };
+}
+
+async function waitForPosition(positionId, symbol, attempts = 8) {
+  for (let i = 0; i < attempts; i += 1) {
+    const rows = await getOpenPositions(symbol);
+    const found = rows.find((row) => String(row.positionId) === String(positionId));
+    if (found || i === attempts - 1) return found || null;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return null;
+}
+
+async function waitForPositionChange(positionId, symbol, beforeVol, attempts = 10) {
+  let last = null;
+  for (let i = 0; i < attempts; i += 1) {
+    const rows = await getOpenPositions(symbol);
+    last = rows.find((row) => String(row.positionId) === String(positionId)) || null;
+    if (!last || Number(last.holdVol) < Number(beforeVol)) return last;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+  throw new Error(`${symbol} piyasa kapanış emri zamanında doğrulanamadı`);
 }
 
 function calculateTieredMargin(account) {
@@ -274,43 +339,58 @@ async function closeLivePosition(symbol) {
 
   const results = [];
   for (const position of positions) {
-    results.push(await privatePost("/api/v1/private/order/create", {
-      symbol: position.symbol,
-      price: 0,
-      vol: Number(position.holdVol) - Number(position.frozenVol || 0),
-      side: Number(position.positionType) === 1 ? 4 : 2,
-      type: 5,
-      openType: Number(position.openType),
-      positionId: position.positionId,
-      positionMode: Number(process.env.MEXC_POSITION_MODE || 1),
-      externalOid: `falix_close_${Date.now()}`,
-    }));
+    results.push(await closeLivePositionVolume(position, Number(position.holdVol)));
   }
   return results;
 }
 
-async function closeLivePositionVolume(position, requestedVol) {
+async function closeLivePositionVolume(position, requestedVol, options = {}) {
   assertLiveConfigured();
   if (!position?.positionId || !position?.symbol) throw new Error("Kapatılacak MEXC pozisyonu geçersiz");
   const contract = await getContract(position.symbol);
-  const available = Math.max(0, Number(position.holdVol) - Number(position.frozenVol || 0));
-  let vol = floorToStep(Math.min(available, Number(requestedVol)), contract.volUnit);
-  if (vol < Number(contract.minVol) && available >= Number(contract.minVol)) {
-    vol = floorToStep(available, contract.volUnit);
+  const originalHold = Math.max(0, Number(position.holdVol));
+  let vol = floorToStep(Math.min(originalHold, Number(requestedVol)), contract.volUnit);
+  if (vol < Number(contract.minVol) && originalHold >= Number(contract.minVol)) {
+    vol = floorToStep(originalHold, contract.volUnit);
   }
   if (vol < Number(contract.minVol)) throw new Error(`${position.symbol} kısmi kapatma miktarı minimumun altında`);
-  const result = await privatePost("/api/v1/private/order/create", {
-    symbol: position.symbol,
-    price: 0,
-    vol,
-    side: Number(position.positionType) === 1 ? 4 : 2,
-    type: 5,
-    openType: Number(position.openType),
-    positionId: position.positionId,
-    positionMode: Number(process.env.MEXC_POSITION_MODE || 1),
-    externalOid: `falix_partial_${Date.now()}`,
-  });
-  return { result, vol, symbol: position.symbol, fullyClosed: vol >= available };
+
+  const tpslOrders = await getCurrentTpslOrders(position.symbol).catch(() => []);
+  const currentStop = tpslOrders.find((order) => String(order.positionId) === String(position.positionId) && Number(order.stopLossPrice) > 0);
+  const fallbackStop = Number(options.restoreStopLossPrice || currentStop?.stopLossPrice || 0);
+  await cancelPositionTpsl(position);
+
+  let result;
+  try {
+    const refreshed = await waitForPosition(position.positionId, position.symbol, 3) || position;
+    result = await privatePost("/api/v1/private/order/create", {
+      symbol: refreshed.symbol,
+      price: 0,
+      vol,
+      side: Number(refreshed.positionType) === 1 ? 4 : 2,
+      type: 5,
+      openType: Number(refreshed.openType),
+      positionId: refreshed.positionId,
+      positionMode: Number(process.env.MEXC_POSITION_MODE || 1),
+      externalOid: `falix_partial_${Date.now()}`,
+    });
+  } catch (err) {
+    const stillOpen = await waitForPosition(position.positionId, position.symbol, 3).catch(() => null);
+    if (stillOpen && fallbackStop > 0) {
+      await placePositionStop(stillOpen, fallbackStop).catch(() => {});
+    }
+    throw err;
+  }
+
+  const remaining = await waitForPositionChange(position.positionId, position.symbol, originalHold, 10);
+  const fullyClosed = !remaining || Number(remaining.holdVol) <= 0;
+  let protection = null;
+  if (!fullyClosed) {
+    const nextStop = Number(options.nextStopLossPrice || fallbackStop);
+    if (!nextStop) throw new Error(`${position.symbol} kısmi kapanış sonrası kurulacak stop bulunamadı`);
+    protection = await placePositionStop(remaining, nextStop, Number(remaining.holdVol));
+  }
+  return { result, vol, symbol: position.symbol, fullyClosed, remainingVol: Number(remaining?.holdVol || 0), protection };
 }
 
 function getConfigDiagnostics() {
@@ -337,6 +417,9 @@ module.exports = {
   getUsdtAccountState,
   getAvailableUsdtBalance,
   getOpenPositions,
+  getCurrentTpslOrders,
+  cancelPositionTpsl,
+  placePositionStop,
   openLiveTrade,
   closeLivePosition,
   closeLivePositionVolume,

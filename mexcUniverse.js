@@ -19,6 +19,11 @@ function scannerSymbol(mexcSymbol) {
   return String(mexcSymbol || "").replace("_", "").toUpperCase();
 }
 
+function isSyntheticNonCrypto(symbol) {
+  const value = scannerSymbol(symbol);
+  return /(STOCK|XAU|XAG|GOLD|SILVER|OIL|BRENT|WTI|NASDAQ|SP500|DOW|DXY)/.test(value);
+}
+
 function buildUniverse(contracts, tickers, options = {}) {
   const size = Math.max(3, Math.min(100, Number(options.size || 50)));
   const minTurnover = Math.max(0, Number(options.minTurnover || 2000000));
@@ -28,6 +33,7 @@ function buildUniverse(contracts, tickers, options = {}) {
   const rows = asArray(contracts).filter((c) => {
     const symbol = String(c.symbol || "").toUpperCase();
     if (!symbol.endsWith("_USDT") || excludes.has(scannerSymbol(symbol))) return false;
+    if (options.cryptoOnly !== false && isSyntheticNonCrypto(symbol)) return false;
     if (Number(c.state) !== 0 || c.apiAllowed === false || c.isHidden === true) return false;
     if (c.isNew === true || c.preMarket === true) return false;
     return true;
@@ -67,6 +73,7 @@ async function getTradingUniverse() {
       size: process.env.UNIVERSE_SIZE || 50,
       minTurnover: process.env.MIN_24H_TURNOVER_USDT || 2000000,
       excludes,
+      cryptoOnly: process.env.CRYPTO_ONLY_UNIVERSE !== "false",
     }
   );
   if (!rows.length) throw new Error("Likidite filtresinden geçen MEXC kontratı bulunamadı");
@@ -78,4 +85,4 @@ async function getTradingUniverse() {
   return cache;
 }
 
-module.exports = { buildUniverse, getTradingUniverse };
+module.exports = { buildUniverse, getTradingUniverse, isSyntheticNonCrypto };

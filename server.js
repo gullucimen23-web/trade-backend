@@ -35,7 +35,7 @@ const {
   closeLivePosition: closeMexcLivePosition,
   getConfigDiagnostics: getMexcConfigDiagnostics,
 } = require("./mexcFutures");
-const { startMexcPositionManager } = require("./mexcPositionManager");
+const { startMexcPositionManager, getManagedPositionsSummary } = require("./mexcPositionManager");
 
 const app = express();
 app.use(express.json());
@@ -431,6 +431,21 @@ app.get("/status", (req, res) => {
       maxOpenPositions: Number(process.env.MAX_OPEN_POSITIONS || 2),
       leverage: Math.min(10, Number(process.env.MEXC_LEVERAGE || 3)),
     },
+    profitPolicy: {
+      cryptoOnly: process.env.CRYPTO_ONLY_UNIVERSE !== "false",
+      universeSize: Number(process.env.UNIVERSE_SIZE || 20),
+      minVolumeRatio: Number(process.env.LIVE_MIN_VOLUME_RATIO || 1.2),
+      minAdx: Number(process.env.LIVE_MIN_ADX || 25),
+      mtfAlignment: process.env.LIVE_REQUIRE_MTF_ALIGNMENT !== "false",
+      guardArmUsdt: Number(process.env.PROFIT_GUARD_ARM_USDT || 0.30),
+      guardGivebackPercent: Number(process.env.PROFIT_GUARD_GIVEBACK_PERCENT || 25),
+      tp1Usdt: Number(process.env.TP1_TRIGGER_USDT || 0.50),
+      tp2Usdt: Number(process.env.TP2_TRIGGER_USDT || 1.00),
+      finalTargetUsdt: Number(process.env.FINAL_TARGET_USDT || 2.00),
+      maxPositionMinutes: Number(process.env.MAX_POSITION_MINUTES || 45),
+      dollarExitMode: process.env.DOLLAR_EXIT_MODE !== "false",
+    },
+    mexcManagedPositions: getManagedPositionsSummary(),
     marketDataSource: getMarketDataSource(),
     followReportMinutes: Number(process.env.FOLLOW_REPORT_MINUTES || 10),
     openai: getOpenAIStats(),

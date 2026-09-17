@@ -24,15 +24,16 @@ function evaluateLiveCandidate(symbol, signal, tradePlan, marketMeta = {}) {
   if (!signal?.entryApproved || signal?.entryBlocked || !["LONG", "SHORT"].includes(side)) reasons.push("strateji onayı yok");
   if (score < num(process.env.MEXC_AUTO_MIN_SCORE, 90)) reasons.push("skor düşük");
   if (confidence < num(process.env.LIVE_MIN_CONFIDENCE, 85)) reasons.push("güven düşük");
-  if (volume < num(process.env.LIVE_MIN_VOLUME_RATIO, 1.05)) reasons.push("hacim zayıf");
+  if (volume < num(process.env.LIVE_MIN_VOLUME_RATIO, 1.2)) reasons.push("hacim zayıf");
   if (volume > num(process.env.LIVE_MAX_VOLUME_RATIO, 4)) reasons.push("hacim patlaması geç giriş riski");
-  if (adx < num(process.env.LIVE_MIN_ADX, 20)) reasons.push("trend gücü zayıf");
+  if (adx < num(process.env.LIVE_MIN_ADX, 25)) reasons.push("trend gücü zayıf");
   if (atr < num(process.env.LIVE_MIN_ATR_PERCENT, 0.12) || atr > num(process.env.LIVE_MAX_ATR_PERCENT, 1.5)) reasons.push("oynaklık güvenli aralık dışında");
   if (move15m > num(process.env.LIVE_MAX_15M_MOVE_PERCENT, 2)) reasons.push("15 dakikalık hareket kovalanmayacak kadar uzamış");
   if (emaDistance > num(process.env.LIVE_MAX_EMA21_DISTANCE_PERCENT, 1.2)) reasons.push("EMA21'den fazla uzaklaşmış");
   if (side === "LONG" && (rsi < num(process.env.LIVE_LONG_RSI_MIN, 52) || rsi > num(process.env.LIVE_LONG_RSI_MAX, 68))) reasons.push("long RSI aralığı uygun değil");
   if (side === "SHORT" && (rsi < num(process.env.LIVE_SHORT_RSI_MIN, 32) || rsi > num(process.env.LIVE_SHORT_RSI_MAX, 48))) reasons.push("short RSI aralığı uygun değil");
   if ((opp1h > same1h + 8) || (opp4h > same4h + 12)) reasons.push("üst zaman yönü ters");
+  if (process.env.LIVE_REQUIRE_MTF_ALIGNMENT !== "false" && (same1h <= opp1h || same4h <= opp4h)) reasons.push("1s/4s yön teyidi aynı değil");
   if (rr < num(process.env.LIVE_MIN_RISK_REWARD, 1.5)) reasons.push("risk/ödül düşük");
 
   const liquidityBoost = Math.min(10, Math.log10(Math.max(1, num(marketMeta.turnover))) * 1.4);

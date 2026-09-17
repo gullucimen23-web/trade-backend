@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node profitDefense.test.js && node riskGuard.test.js"
+    "test": "node profitDefense.test.js && node riskGuard.test.js && node universe.test.js"
   },
   "keywords": [],
   "author": "",
