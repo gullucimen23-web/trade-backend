@@ -34,6 +34,7 @@ En az 7 gün paper sonuçlarını incele. Kâr garantisi yoktur; pump yakalama f
 - Hacim hesabında yalnızca kapanmış mumları kullanma; WAIT sinyallerini onay listesine almama ve emir öncesi güncel fiyat kayma kontrolü.
 - Stop fiyatını her kontratın `priceUnit` adımına göre yönlü yuvarlama; varsayılan olarak girişe yalnızca sert stop ekleyip TP1/TP2/trailing kâr yönetimini pozisyon yöneticisine bırakma.
 - Kısmi/tam kâr alırken pozisyona bağlı stopu önce iptal etme, kapanan miktarı borsadan doğrulama ve kalan kontrata daha iyi stopu yeniden kurma.
+- Canlı girişte piyasa emrini stopsuz ek parametrelerle reddettirmemek; gerçekleşen gerçek giriş fiyatını doğruladıktan hemen sonra pozisyona borsa stopu kurma. Stop kurulamazsa pozisyonu güvenlik için anında kapatma.
 
 ## Kâr koruma ayarları
 

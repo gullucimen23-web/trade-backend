@@ -451,12 +451,16 @@ async function executeBestMexcCandidate(candidates) {
     registerManagedPosition({
       symbol: best.symbol,
       side: best.signal.side,
-      tradePlan: best.tradePlan,
+      tradePlan: {
+        ...best.tradePlan,
+        entry: liveOrder.entryPrice || latestPrice,
+        stopLossPrice: liveOrder.stopLossPrice,
+      },
       vol: liveOrder.vol,
       marginUsdt: liveOrder.marginUsdt,
       leverage: liveOrder.leverage,
     });
-    await sendTelegram(`🔴 <b>MEXC GERÇEK EMİR AÇILDI</b>\n${liveOrder.symbol} ${best.signal.side}\nSeçim puanı: <b>${best.gate.selectionScore}</b>\nHesap değeri: <b>${liveOrder.equityUsdt} USDT</b>\nMarj: <b>${liveOrder.marginUsdt} USDT</b>\nKorunan rezerv: <b>${liveOrder.reserveUsdt} USDT</b>\nKontrat: <b>${liveOrder.vol}</b>\nKaldıraç: <b>${liveOrder.leverage}x</b>\nUygun bakiye varsa farklı coin için ikinci fırsat aranacak.`);
+    await sendTelegram(`🔴 <b>MEXC GERÇEK EMİR AÇILDI</b>\n${liveOrder.symbol} ${best.signal.side}\nSeçim puanı: <b>${best.gate.selectionScore}</b>\nGerçek giriş: <b>${liveOrder.entryPrice}</b>\nBorsa stopu: <b>${liveOrder.stopLossPrice}</b> ✅\nHesap değeri: <b>${liveOrder.equityUsdt} USDT</b>\nMarj: <b>${liveOrder.marginUsdt} USDT</b>\nKorunan rezerv: <b>${liveOrder.reserveUsdt} USDT</b>\nKontrat: <b>${liveOrder.vol}</b>\nKaldıraç: <b>${liveOrder.leverage}x</b>`);
   } catch (err) {
     if (attemptedSymbol) liveFailureLocks[attemptedSymbol] = Date.now();
     console.error("MEXC en iyi aday emir hatası:", err.message);

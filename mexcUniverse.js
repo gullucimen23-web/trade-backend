@@ -21,7 +21,7 @@ function scannerSymbol(mexcSymbol) {
 
 function isSyntheticNonCrypto(symbol) {
   const value = scannerSymbol(symbol);
-  return /(STOCK|XAU|XAG|GOLD|SILVER|OIL|BRENT|WTI|NASDAQ|SP500|DOW|DXY)/.test(value);
+  return /(STOCK|XAU|XAG|GOLD|SILVER|OIL|BRENT|WTI|NASDAQ|SPX500|SP500|DOW|DXY|SPY|QQQ|SOXL|SQQQ|TQQQ)/.test(value);
 }
 
 function buildUniverse(contracts, tickers, options = {}) {
@@ -33,7 +33,7 @@ function buildUniverse(contracts, tickers, options = {}) {
   const rows = asArray(contracts).filter((c) => {
     const symbol = String(c.symbol || "").toUpperCase();
     if (!symbol.endsWith("_USDT") || excludes.has(scannerSymbol(symbol))) return false;
-    if (options.cryptoOnly !== false && isSyntheticNonCrypto(symbol)) return false;
+    if (options.cryptoOnly !== false && (Number(c.typeLabel || 0) !== 0 || isSyntheticNonCrypto(symbol))) return false;
     if (Number(c.state) !== 0 || c.apiAllowed === false || c.isHidden === true) return false;
     if (c.isNew === true || c.preMarket === true) return false;
     return true;

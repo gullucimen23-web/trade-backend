@@ -242,6 +242,17 @@ async function waitForPosition(positionId, symbol, attempts = 8) {
   return null;
 }
 
+async function waitForOpenedPosition(symbol, side, attempts = 20) {
+  const wantedType = side === "LONG" ? 1 : 2;
+  for (let i = 0; i < attempts; i += 1) {
+    const rows = await getOpenPositions(symbol);
+    const found = rows.find((row) => Number(row.positionType) === wantedType && Number(row.holdVol) > 0);
+    if (found) return found;
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+  return null;
+}
+
 async function waitForPositionChange(positionId, symbol, beforeVol, attempts = 10) {
   let last = null;
   for (let i = 0; i < attempts; i += 1) {
@@ -295,11 +306,9 @@ async function openLiveTrade({ symbol, side, currentPrice, stopLossPrice, takePr
     takeProfitPrice,
     priceUnit: contract.priceUnit,
   });
-  const triggerType = contract.stopOnlyFair === true
-    ? 2
-    : Math.min(3, Math.max(1, Number(process.env.MEXC_TRIGGER_PRICE_TYPE || 1)));
-  const attachTp3 = process.env.MEXC_ATTACH_TP3 === "true";
-
+  // MEXC bazı kontratlarda giriş emrine eklenen stop fiyatını, piyasa emri
+  // gerçekleşene kadar değişen son fiyata göre reddedebiliyor. Önce yalnızca
+  // piyasa girişini gerçekleştir; gerçek ortalama girişten sonra pozisyona stop kur.
   const result = await privatePost("/api/v1/private/order/create", {
     symbol: mexcSymbol,
     price: 0,
@@ -309,12 +318,37 @@ async function openLiveTrade({ symbol, side, currentPrice, stopLossPrice, takePr
     type: 5,
     openType: Number(process.env.MEXC_OPEN_TYPE || 1),
     positionMode: Number(process.env.MEXC_POSITION_MODE || 1),
-    stopLossPrice: protection.stopLossPrice,
-    takeProfitPrice: attachTp3 ? protection.takeProfitPrice : undefined,
-    lossTrend: triggerType,
-    profitTrend: attachTp3 ? triggerType : undefined,
     externalOid: `falix_${Date.now()}`,
   });
+
+  const position = await waitForOpenedPosition(mexcSymbol, side);
+  if (!position) {
+    await privatePost("/api/v1/private/position/close_all", {}).catch(() => {});
+    throw new Error(`${mexcSymbol} piyasa girişi pozisyon olarak doğrulanamadı; güvenlik kapatması gönderildi`);
+  }
+
+  const actualEntry = Number(position.holdAvgPrice || position.openAvgPrice || currentPrice);
+  const requestedDistance = Math.abs((Number(currentPrice) - Number(stopLossPrice)) / Number(currentPrice)) * 100;
+  const stopDistancePercent = Math.max(Number(process.env.MEXC_MIN_STOP_DISTANCE_PERCENT || 0.25), requestedDistance);
+  const actualStopRaw = side === "LONG"
+    ? actualEntry * (1 - stopDistancePercent / 100)
+    : actualEntry * (1 + stopDistancePercent / 100);
+  const actualStop = normalizeStopPrice(position.positionType, actualStopRaw, contract.priceUnit);
+
+  let stopProtection;
+  try {
+    stopProtection = await placePositionStop(position, actualStop, Number(position.holdVol));
+  } catch (stopErr) {
+    let closeError = null;
+    try {
+      await closeLivePositionVolume(position, Number(position.holdVol));
+    } catch (err) {
+      closeError = err;
+      await privatePost("/api/v1/private/position/close_all", {}).catch(() => {});
+    }
+    const extra = closeError ? `; normal kapatma hatası: ${closeError.message}` : "";
+    throw new Error(`${mexcSymbol} koruyucu stop kurulamadı; pozisyon güvenlik için kapatıldı: ${stopErr.message}${extra}`);
+  }
 
   return {
     result,
@@ -326,8 +360,11 @@ async function openLiveTrade({ symbol, side, currentPrice, stopLossPrice, takePr
     availableUsdt: account.available,
     equityUsdt: account.equity,
     reserveUsdt: allocation.reserveUsdt,
-    stopLossPrice: protection.stopLossPrice,
-    takeProfitPrice: attachTp3 ? protection.takeProfitPrice : null,
+    entryPrice: actualEntry,
+    positionId: position.positionId,
+    stopLossPrice: Number(stopProtection.stopLossPrice),
+    takeProfitPrice: null,
+    protectionOrderId: stopProtection.result,
     live: true,
   };
 }
