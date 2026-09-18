@@ -70,7 +70,7 @@ async function getTradingUniverse() {
     unwrap(contractResponse.data),
     unwrap(tickerResponse.data),
     {
-      size: process.env.UNIVERSE_SIZE || 50,
+      size: process.env.UNIVERSE_SIZE || 10,
       minTurnover: process.env.MIN_24H_TURNOVER_USDT || 2000000,
       excludes,
       cryptoOnly: process.env.CRYPTO_ONLY_UNIVERSE !== "false",

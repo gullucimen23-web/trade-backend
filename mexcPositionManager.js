@@ -104,10 +104,10 @@ function evaluateProfitDefense(row, pnl, now = Date.now()) {
   const currentPercent = Number(pnl.percent || 0);
   const previousPeak = Number(row.bestPnlPercent || 0);
   const peakPercent = Math.max(previousPeak, currentPercent);
-  const armUsdt = numberEnv("PROFIT_GUARD_ARM_USDT", 0.30, 0.05);
-  const givebackRatio = numberEnv("PROFIT_GUARD_GIVEBACK_PERCENT", 25, 5) / 100;
-  const estimatedRoundTripFeePercent = numberEnv("PROFIT_GUARD_FEE_PERCENT", 0.10, 0);
-  const minNetUsdt = numberEnv("PROFIT_GUARD_MIN_NET_USDT", 0.02, 0);
+  const armUsdt = numberEnv("PROFIT_GUARD_ARM_USDT", 0.15, 0.05);
+  const givebackRatio = numberEnv("PROFIT_GUARD_GIVEBACK_PERCENT", 10, 5) / 100;
+  const estimatedRoundTripFeePercent = numberEnv("PROFIT_GUARD_FEE_PERCENT", 0.20, 0);
+  const minNetUsdt = numberEnv("PROFIT_GUARD_MIN_NET_USDT", 0.03, 0);
   const notionalUsdt = Number(row.marginUsdt || 0) * Number(row.leverage || 1);
   const estimatedFeeUsdt = notionalUsdt * estimatedRoundTripFeePercent / 100;
   const estimatedNetUsdt = Number(pnl.usdt || 0) - estimatedFeeUsdt;
@@ -116,7 +116,7 @@ function evaluateProfitDefense(row, pnl, now = Date.now()) {
   const usdtGiveback = peakUsdt > 0 ? (peakUsdt - Number(pnl.usdt || 0)) / peakUsdt : 0;
   const armed = Boolean(row.profitGuardArmed) || peakUsdt >= armUsdt;
 
-  const maxMinutes = numberEnv("MAX_POSITION_MINUTES", 45, 5);
+  const maxMinutes = numberEnv("MAX_POSITION_MINUTES", 180, 5);
   const timeExitMaxLossPercent = numberEnv("TIME_EXIT_MAX_LOSS_PERCENT", 0.12, 0);
   const ageMinutes = Math.max(0, (now - new Date(row.createdAt).getTime()) / 60000);
 
@@ -134,16 +134,20 @@ function evaluateProfitDefense(row, pnl, now = Date.now()) {
 
 function protectedStop(row, lockPercent = 0.15) {
   const entry = Number(row.entry);
+  const notionalUsdt = Math.max(0.01, Number(row.marginUsdt || 0) * Number(row.leverage || 1));
+  const estimatedCostPercent = numberEnv("EDGE_ALL_IN_COST_PERCENT", numberEnv("PROFIT_GUARD_FEE_PERCENT", 0.20, 0), 0);
+  const minNetPercent = numberEnv("PROFIT_GUARD_MIN_NET_USDT", 0.03, 0) / notionalUsdt * 100;
+  const feeSafeLockPercent = Math.max(Number(lockPercent || 0), estimatedCostPercent + minNetPercent);
   return row.side === "LONG"
-    ? entry * (1 + lockPercent / 100)
-    : entry * (1 - lockPercent / 100);
+    ? entry * (1 + feeSafeLockPercent / 100)
+    : entry * (1 - feeSafeLockPercent / 100);
 }
 
 function dollarStage(row, pnl) {
   const equivalentUsdt = Number(row.marginUsdt || 0) * Number(row.leverage || 1) * Number(pnl.percent || 0) / 100;
-  if (!row.tp1Done && equivalentUsdt >= numberEnv("TP1_TRIGGER_USDT", 0.50, 0.05)) return "TP1";
-  if (row.tp1Done && !row.tp2Done && equivalentUsdt >= numberEnv("TP2_TRIGGER_USDT", 1.00, 0.10)) return "TP2";
-  if (row.tp2Done && equivalentUsdt >= numberEnv("FINAL_TARGET_USDT", 2.00, 0.20)) return "FINAL";
+  if (!row.tp1Done && equivalentUsdt >= numberEnv("TP1_TRIGGER_USDT", 0.30, 0.05)) return "TP1";
+  if (row.tp1Done && !row.tp2Done && equivalentUsdt >= numberEnv("TP2_TRIGGER_USDT", 0.60, 0.10)) return "TP2";
+  if (row.tp2Done && equivalentUsdt >= numberEnv("FINAL_TARGET_USDT", 1.00, 0.20)) return "FINAL";
   return null;
 }
 
@@ -215,7 +219,7 @@ async function managePositions() {
         continue;
       }
 
-      const dollarExitMode = process.env.DOLLAR_EXIT_MODE !== "false";
+      const dollarExitMode = process.env.DOLLAR_EXIT_MODE === "true";
 
       if (stage === "TP1" || (!dollarExitMode && !row.tp1Done && targetReached(row, price, row.tp1Price))) {
         const nextStop = protectedStop(row, numberEnv("TP1_LOCK_PERCENT", 0.15, 0.02));

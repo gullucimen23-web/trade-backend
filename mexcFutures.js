@@ -269,14 +269,38 @@ function calculateTieredMargin(account) {
   const smallMargin = Math.max(1, Number(process.env.MEXC_SMALL_MARGIN_USDT || 10));
   const growthMargin = Math.max(1, Number(process.env.MEXC_GROWTH_MARGIN_USDT || 20));
   const reserve = account.equity >= threshold ? Math.max(0, Number(process.env.MEXC_MIN_RESERVE_USDT || 10)) : 0;
-  const marginUsdt = account.equity >= threshold ? growthMargin : smallMargin;
-  if (account.available - marginUsdt < reserve) {
+  const configuredMargin = account.equity >= threshold ? growthMargin : smallMargin;
+  const deployable = Math.max(0, Number(account.available) - reserve);
+  const marginUsdt = Math.min(configuredMargin, deployable);
+  if (marginUsdt <= 0) {
     throw new Error(`Yeni işlem için bakiye/rezerv yetersiz. Kullanılabilir: ${account.available}, korunacak: ${reserve}`);
   }
-  return { marginUsdt: Number(marginUsdt.toFixed(4)), reserveUsdt: reserve, threshold };
+  return { marginUsdt: Number(marginUsdt.toFixed(4)), maxMarginUsdt: configuredMargin, reserveUsdt: reserve, threshold };
 }
 
-async function openLiveTrade({ symbol, side, currentPrice, stopLossPrice, takeProfitPrice }) {
+function calculateRiskBasedMargin(account, stopLossPercent, leverage) {
+  const tier = calculateTieredMargin(account);
+  const riskPercent = Math.max(0.1, Number(process.env.RISK_PER_TRADE_PERCENT || 0.75));
+  const riskBudgetUsdt = Number(account.equity) * riskPercent / 100;
+  const stopFraction = Math.max(0.001, Number(stopLossPercent) / 100);
+  const riskNotionalUsdt = riskBudgetUsdt / stopFraction;
+  const marginUsdt = Math.min(tier.marginUsdt, riskNotionalUsdt / Number(leverage));
+  const minMargin = Math.max(0.1, Number(process.env.MIN_RISK_BASED_MARGIN_USDT || 0.50));
+  if (!Number.isFinite(marginUsdt) || marginUsdt < minMargin) {
+    throw new Error(`Risk bazlı marjin çok düşük: ${Number(marginUsdt || 0).toFixed(4)} USDT`);
+  }
+  const notionalUsdt = marginUsdt * Number(leverage);
+  return {
+    ...tier,
+    marginUsdt: Number(marginUsdt.toFixed(4)),
+    notionalUsdt: Number(notionalUsdt.toFixed(4)),
+    riskPercent,
+    riskBudgetUsdt: Number(riskBudgetUsdt.toFixed(4)),
+    estimatedRiskUsdt: Number((notionalUsdt * stopFraction).toFixed(4)),
+  };
+}
+
+async function openLiveTrade({ symbol, side, currentPrice, stopLossPrice, takeProfitPrice, expectedTargetPercent }) {
   assertLiveConfigured();
   if (!["LONG", "SHORT"].includes(side)) throw new Error("Yön LONG veya SHORT olmalı");
 
@@ -288,11 +312,18 @@ async function openLiveTrade({ symbol, side, currentPrice, stopLossPrice, takePr
   ]);
   if (existing.length > 0) throw new Error(`${mexcSymbol} için zaten açık MEXC pozisyonu var`);
 
-  // TIERED: 50 USDT altı 10 USDT; 50+ hesapta 20 USDT ve en az 10 USDT rezerv.
   const leverage = Math.min(10, Math.max(Number(contract.minLeverage || 1), Number(process.env.MEXC_LEVERAGE || 3)));
-  const allocation = calculateTieredMargin(account);
+  const stopLossPercent = Math.abs((Number(currentPrice) - Number(stopLossPrice)) / Number(currentPrice)) * 100;
+  const allocation = calculateRiskBasedMargin(account, stopLossPercent, leverage);
   const marginUsdt = allocation.marginUsdt;
-  const notionalUsdt = marginUsdt * leverage;
+  const notionalUsdt = allocation.notionalUsdt;
+  const allInCostPercent = Math.max(0, Number(process.env.EDGE_ALL_IN_COST_PERCENT || 0.20));
+  const targetPercent = Math.max(0, Number(expectedTargetPercent || 0));
+  const expectedNetAtTargetUsdt = notionalUsdt * (targetPercent - allInCostPercent) / 100;
+  const minExpectedNetUsdt = Math.max(0, Number(process.env.EDGE_MIN_EXPECTED_NET_USDT || 0.05));
+  if (targetPercent <= allInCostPercent || expectedNetAtTargetUsdt < minExpectedNetUsdt) {
+    throw new Error(`Maliyet sonrası TP1 avantajı yetersiz: ${expectedNetAtTargetUsdt.toFixed(3)} USDT`);
+  }
   const rawContracts = notionalUsdt / (Number(currentPrice) * Number(contract.contractSize));
   const vol = floorToStep(rawContracts, contract.volUnit);
   if (vol < Number(contract.minVol) || vol > Number(contract.maxVol)) {
@@ -357,6 +388,9 @@ async function openLiveTrade({ symbol, side, currentPrice, stopLossPrice, takePr
     vol,
     leverage,
     marginUsdt,
+    riskBudgetUsdt: allocation.riskBudgetUsdt,
+    estimatedRiskUsdt: allocation.estimatedRiskUsdt,
+    expectedNetAtTargetUsdt: Number(expectedNetAtTargetUsdt.toFixed(4)),
     availableUsdt: account.available,
     equityUsdt: account.equity,
     reserveUsdt: allocation.reserveUsdt,
@@ -449,6 +483,7 @@ module.exports = {
   normalizeSymbol,
   normalizeProtectionPrices,
   calculateTieredMargin,
+  calculateRiskBasedMargin,
   syncTime,
   getAssets,
   getUsdtAccountState,

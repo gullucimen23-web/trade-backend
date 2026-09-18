@@ -1,5 +1,6 @@
 const { getKlines, getPrice } = require("./marketData");
 const { analyzeMarket, analyzeMultiTimeframe, analyzeSwingPlan } = require("./strategy");
+const { analyzeProfitEdgePlan } = require("./edgeStrategy");
 const { askOpenAIWithGuard } = require("./openaiGuard");
 const { sendTelegram, sendTelegramWithButtons } = require("./telegram");
 const { buildTradePlan } = require("./risk");
@@ -265,13 +266,17 @@ Açık pozisyon varsa bot takip eder. Aksiyon dili: BEKLE / HAZIR OL / İŞLEM A
 }
 
 async function scanSymbol(symbol) {
-  const [candles15m, candles1h, candles4h] = await Promise.all([
+  const [candles5m, candles15m, candles1h, candles4h] = await Promise.all([
     getKlines(symbol, "5m", 220),
+    getKlines(symbol, "15m", 220),
     getKlines(symbol, "1h", 220),
     getKlines(symbol, "4h", 220),
   ]);
 
-  const signal = analyzeSwingPlan({ candles15m, candles1h, candles4h });
+  const entryMode = String(process.env.LIVE_ENTRY_MODE || "EDGE_V9").trim().toUpperCase();
+  const signal = entryMode === "LEGACY_V8"
+    ? analyzeSwingPlan({ candles15m: candles5m, candles1h, candles4h })
+    : analyzeProfitEdgePlan({ candles5m, candles15m, candles1h, candles4h });
   const currentPrice = signal.lastClose;
   latestSignals[symbol] = signal;
 
@@ -390,7 +395,7 @@ async function executeBestMexcCandidate(candidates) {
   try {
     const [positions, account] = await Promise.all([getMexcOpenPositions(), getUsdtAccountState()]);
     const threshold = Number(process.env.MEXC_TIER_THRESHOLD_USDT || 50);
-    const configuredMax = Math.max(1, Number(process.env.MAX_OPEN_POSITIONS || 2));
+    const configuredMax = Math.max(1, Number(process.env.MAX_OPEN_POSITIONS || 1));
     const maxOpen = account.equity >= threshold ? Math.min(2, configuredMax) : 1;
     if (positions.length >= maxOpen) {
       console.log(`🛡️ Açık pozisyon limiti dolu: ${positions.length}/${maxOpen}`);
@@ -405,7 +410,10 @@ async function executeBestMexcCandidate(candidates) {
       .filter((candidate) => !liveFailureLocks[candidate.symbol] || Date.now() - liveFailureLocks[candidate.symbol] > failureCooldownMs)
       .map((candidate) => ({
         ...candidate,
-        gate: evaluateLiveCandidate(candidate.symbol, candidate.signal, candidate.tradePlan, currentMarketMeta[candidate.symbol]),
+        gate: evaluateLiveCandidate(candidate.symbol, candidate.signal, candidate.tradePlan, {
+          ...currentMarketMeta[candidate.symbol],
+          affordableNotional,
+        }),
       })).filter((candidate) => candidate.gate.allowed);
 
     const evaluated = gatePassed.filter((candidate) => {
@@ -446,6 +454,7 @@ async function executeBestMexcCandidate(candidates) {
       currentPrice: latestPrice,
       stopLossPrice: best.tradePlan.stopLossPrice,
       takeProfitPrice: best.tradePlan.tp3Price,
+      expectedTargetPercent: best.tradePlan.tp1Percent,
     });
     registerTradeOpen();
     registerManagedPosition({
@@ -461,7 +470,7 @@ async function executeBestMexcCandidate(candidates) {
       equityUsdt: liveOrder.equityUsdt,
       leverage: liveOrder.leverage,
     });
-    await sendTelegram(`🔴 <b>MEXC GERÇEK EMİR AÇILDI</b>\n${liveOrder.symbol} ${best.signal.side}\nSeçim puanı: <b>${best.gate.selectionScore}</b>\nGerçek giriş: <b>${liveOrder.entryPrice}</b>\nBorsa stopu: <b>${liveOrder.stopLossPrice}</b> ✅\nHesap değeri: <b>${liveOrder.equityUsdt} USDT</b>\nMarj: <b>${liveOrder.marginUsdt} USDT</b>\nKorunan rezerv: <b>${liveOrder.reserveUsdt} USDT</b>\nKontrat: <b>${liveOrder.vol}</b>\nKaldıraç: <b>${liveOrder.leverage}x</b>`);
+    await sendTelegram(`🔴 <b>MEXC GERÇEK EMİR AÇILDI</b>\n${liveOrder.symbol} ${best.signal.side}\nMotor: <b>${best.gate.mode}</b>\nSeçim puanı: <b>${best.gate.selectionScore}</b>\nGerçek giriş: <b>${liveOrder.entryPrice}</b>\nBorsa stopu: <b>${liveOrder.stopLossPrice}</b> ✅\nHesap değeri: <b>${liveOrder.equityUsdt} USDT</b>\nRisk bütçesi: <b>${liveOrder.riskBudgetUsdt} USDT</b>\nMarj: <b>${liveOrder.marginUsdt} USDT</b>\nTahmini maliyet sonrası TP1: <b>${liveOrder.expectedNetAtTargetUsdt} USDT</b>\nKorunan rezerv: <b>${liveOrder.reserveUsdt} USDT</b>\nKontrat: <b>${liveOrder.vol}</b>\nKaldıraç: <b>${liveOrder.leverage}x</b>`);
   } catch (err) {
     if (attemptedSymbol) liveFailureLocks[attemptedSymbol] = Date.now();
     console.error("MEXC en iyi aday emir hatası:", err.message);

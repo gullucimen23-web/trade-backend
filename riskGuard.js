@@ -42,8 +42,8 @@ function persist(kind) {
 function canOpenTrade(kind = "LIVE") {
   const key = resetIfNewDay(kind);
   const prefix = key === "LIVE" ? "" : `${key}_`;
-  const maxTrades = Number(process.env[`${prefix}MAX_TRADES_PER_DAY`] || process.env.MAX_TRADES_PER_DAY || 20);
-  const maxLoss = Number(process.env[`${prefix}MAX_DAILY_LOSS_PERCENT`] || process.env.MAX_DAILY_LOSS_PERCENT || 5);
+  const maxTrades = Number(process.env[`${prefix}MAX_TRADES_PER_DAY`] || process.env.MAX_TRADES_PER_DAY || 3);
+  const maxLoss = Number(process.env[`${prefix}MAX_DAILY_LOSS_PERCENT`] || process.env.MAX_DAILY_LOSS_PERCENT || 2);
   const pauseUntil = stats[key].pauseUntil ? new Date(stats[key].pauseUntil).getTime() : 0;
   if (pauseUntil > Date.now()) {
     const minutes = Math.max(1, Math.ceil((pauseUntil - Date.now()) / 60000));

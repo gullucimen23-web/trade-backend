@@ -5,6 +5,7 @@ function num(value, fallback = 0) {
 
 function evaluateLiveCandidate(symbol, signal, tradePlan, marketMeta = {}) {
   const reasons = [];
+  const mode = String(process.env.LIVE_ENTRY_MODE || "EDGE_V9").trim().toUpperCase();
   const side = signal?.side;
   const score = num(signal?.score);
   const confidence = num(signal?.confidence);
@@ -22,7 +23,36 @@ function evaluateLiveCandidate(symbol, signal, tradePlan, marketMeta = {}) {
   const opp4h = num(mtf.opp4h);
 
   if (!signal?.entryApproved || signal?.entryBlocked || !["LONG", "SHORT"].includes(side)) reasons.push("strateji onayı yok");
-  if (score < num(process.env.MEXC_AUTO_MIN_SCORE, 90)) reasons.push("skor düşük");
+  if (score < num(process.env.MEXC_AUTO_MIN_SCORE, mode === "EDGE_V9" ? 78 : 85)) reasons.push("skor düşük");
+
+  if (mode === "EDGE_V9") {
+    if (signal?.mode !== "EDGE_V9_COST_AWARE") reasons.push("edge motoru sinyali değil");
+    if (signal?.mtfSummary?.mtfOk !== true) reasons.push("1s/15dk rejim uyumu yok");
+    if (signal?.entryTrigger?.triggerConfirmed !== true) reasons.push("5dk giriş tetiği yok");
+    const costMultiple = num(signal?.costEdgeRatio ?? tradePlan?.costEdgeRatio);
+    if (costMultiple < num(process.env.EDGE_MIN_COST_MULTIPLE, 3)) reasons.push("maliyet sonrası avantaj yetersiz");
+    const maxMove = num(process.env.EDGE_MAX_EXTENSION_PERCENT, 1.2);
+    if (emaDistance > maxMove) reasons.push("giriş trend ortalamasından fazla uzak");
+    const liquidityBoost = Math.min(8, Math.log10(Math.max(1, num(marketMeta.turnover))) * 1.1);
+    const selectionScore = Number((score + costMultiple * 2 + liquidityBoost - emaDistance * 3).toFixed(2));
+    return { symbol, allowed: reasons.length === 0, reasons, selectionScore, mode: "EDGE_V9" };
+  }
+
+  // Eski V8 davranışı: V8 yön/puan/hacim onayı canlı seçim için yeterlidir.
+  // Emir kayması, açık pozisyon limiti, borsa stopu ve günlük risk kontrolleri
+  // scanner/execution katmanlarında çalışmaya devam eder.
+  if (mode === "LEGACY_V8") {
+    const legacyMinVolume = num(
+      process.env.V8_MIN_VOLUME_RATIO || process.env.MIN_ENTRY_VOLUME_RATIO,
+      0.45
+    );
+    if (volume < legacyMinVolume) reasons.push("V8 hacmi yetersiz");
+
+    const liquidityBoost = Math.min(5, Math.log10(Math.max(1, num(marketMeta.turnover))) * 0.7);
+    const selectionScore = Number((score + confidence * 0.03 + Math.min(3, volume) * 0.5 + liquidityBoost).toFixed(2));
+    return { symbol, allowed: reasons.length === 0, reasons, selectionScore, mode };
+  }
+
   if (confidence < num(process.env.LIVE_MIN_CONFIDENCE, 85)) reasons.push("güven düşük");
   if (volume < num(process.env.LIVE_MIN_VOLUME_RATIO, 1.2)) reasons.push("hacim zayıf");
   if (volume > num(process.env.LIVE_MAX_VOLUME_RATIO, 4)) reasons.push("hacim patlaması geç giriş riski");
@@ -38,7 +68,7 @@ function evaluateLiveCandidate(symbol, signal, tradePlan, marketMeta = {}) {
 
   const liquidityBoost = Math.min(10, Math.log10(Math.max(1, num(marketMeta.turnover))) * 1.4);
   const selectionScore = Number((score * 0.45 + confidence * 0.25 + Math.min(100, adx * 2) * 0.15 + Math.min(100, volume * 25) * 0.10 + liquidityBoost - move15m * 4 - emaDistance * 3).toFixed(2));
-  return { symbol, allowed: reasons.length === 0, reasons, selectionScore };
+  return { symbol, allowed: reasons.length === 0, reasons, selectionScore, mode: "STRICT" };
 }
 
 module.exports = { evaluateLiveCandidate };
